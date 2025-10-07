@@ -1,0 +1,8 @@
+﻿__pycache__/
+.ipynb_checkpoints/
+.env
+*.csv
+*.zip
+plots/
+*.png
+.DS_Store
