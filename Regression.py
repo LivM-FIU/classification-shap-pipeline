@@ -1,33 +1,28 @@
 # -----------------------------
-# REGRESSION PIPELINE (HW3 Task 3 & 4)
+# REGRESSION PIPELINE (HW3 Task 3 & 4) - Improved
 # -----------------------------
 import pandas as pd
 import numpy as np
+import shap
+import matplotlib.pyplot as plt
 
 from sklearn.model_selection import KFold, cross_validate, train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, make_scorer
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-
 from xgboost import XGBRegressor
 from lightgbm import LGBMRegressor
 from catboost import CatBoostRegressor
 
-import shap
-import matplotlib.pyplot as plt
-
 # ---------- Load data ----------
-# If downloaded from Google Drive, load the CSV path here:
-# The dataset should include columns: ["cell_line", "drug", "LN_IC50", <gene features...>]
-gdsc = pd.read_csv("GDSC2_13drugs_LN_IC50.csv")  # rename to your local filename
+gdsc = pd.read_csv("hw3-drug-screening-data.csv")  # Update path if needed
 
-id_cols = ["cell_line", "drug"]
+id_cols = ["CELL_LINE_NAME", "DRUG_NAME"]
 assert all(c in gdsc.columns for c in id_cols + ["LN_IC50"]), "Missing required columns."
 
 y = gdsc["LN_IC50"].values
 meta = gdsc[id_cols].copy()
 X = gdsc.drop(columns=id_cols + ["LN_IC50"])
-
 feature_names = X.columns.tolist()
 
 # ---------- Define models ----------
@@ -36,39 +31,37 @@ regressors = {
     "RandomForest": RandomForestRegressor(n_estimators=400, random_state=42, n_jobs=-1),
     "GBM": GradientBoostingRegressor(random_state=42),
     "XGBoost": XGBRegressor(
-        n_estimators=600, learning_rate=0.05, max_depth=6,
-        subsample=0.9, colsample_bytree=0.9, random_state=42, n_jobs=-1,
-        tree_method="hist"
+        n_estimators=200, learning_rate=0.05, max_depth=6,
+        subsample=0.9, colsample_bytree=0.9, random_state=42, n_jobs=-1, tree_method="hist"
     ),
     "LightGBM": LGBMRegressor(
-        n_estimators=800, learning_rate=0.05, num_leaves=64,
+        n_estimators=200, learning_rate=0.05, num_leaves=64,
         subsample=0.9, colsample_bytree=0.9, random_state=42, n_jobs=-1
     ),
     "CatBoost": CatBoostRegressor(
-        iterations=800, learning_rate=0.05, depth=6,
+        iterations=200, learning_rate=0.05, depth=6,
         random_seed=42, verbose=False, loss_function="RMSE"
     ),
 }
 
-# ---------- CV & Model selection (Task 3) ----------
+# ---------- CV & Model selection ----------
 cv = KFold(n_splits=5, shuffle=True, random_state=42)
 scoring = {
-    "mae": make_scorer(mean_absolute_error, greater_is_better=False),
-    "mse": make_scorer(mean_squared_error, greater_is_better=False),
-    # RMSE we’ll compute from MSE later
-    "r2": make_scorer(r2_score)
+    "MAE": make_scorer(mean_absolute_error),
+    "MSE": make_scorer(mean_squared_error),
+    "R2": make_scorer(r2_score),
 }
 
 reg_results = {}
 for name, model in regressors.items():
     cv_res = cross_validate(model, X, y, cv=cv, scoring=scoring, n_jobs=-1)
-    mae = -np.mean(cv_res["test_mae"])
-    mse = -np.mean(cv_res["test_mse"])
+    mae = np.mean(cv_res["test_MAE"])
+    mse = np.mean(cv_res["test_MSE"])
     rmse = np.sqrt(mse)
-    r2 = np.mean(cv_res["test_r2"])
+    r2 = np.mean(cv_res["test_R2"])
     reg_results[name] = {"MAE": mae, "MSE": mse, "RMSE": rmse, "R2": r2}
 
-reg_df = pd.DataFrame(reg_results).T.sort_values(by=["RMSE","MAE","R2"], ascending=[True,True,False])
+reg_df = pd.DataFrame(reg_results).T.sort_values(by=["RMSE", "MAE", "R2"], ascending=[True, True, False])
 print("\n=== Regression CV Results (mean metrics) ===")
 print(reg_df)
 
@@ -76,56 +69,73 @@ best_reg_name = reg_df.index[0]
 best_reg = regressors[best_reg_name]
 print(f"\nBest regressor: {best_reg_name}")
 
-# Fit best regressor on train; keep a test split for SHAP & error analysis
+# ---------- Train-test split + final fit ----------
+# keep alignment between X_test rows and meta_test rows by resetting index
 X_train, X_test, y_train, y_test, meta_train, meta_test = train_test_split(
     X, y, meta, test_size=0.2, random_state=42
 )
+# reset indices so positions 0..N_test-1 match across X_test, y_test, meta_test
+X_test = X_test.reset_index(drop=True)
+y_test = pd.Series(y_test).reset_index(drop=True).values
+meta_test = meta_test.reset_index(drop=True)
+
 best_reg.fit(X_train, y_train)
 
-# ---------- SHAP: Global (per-drug Top-10) (Task 4a) ----------
-# TreeExplainer works well for these models
-explainer_r = shap.TreeExplainer(best_reg)
-shap_values_r = explainer_r.shap_values(X_test)  # shape: [n_samples, n_features]
-abs_shap = np.abs(shap_values_r)
+# ---------- SHAP on full X_test (needed for per-drug grouping) ----------
+# choose explainer for tree models
+if best_reg_name in ["DecisionTree", "RandomForest", "GBM", "XGBoost", "LightGBM", "CatBoost"]:
+    explainer_r = shap.TreeExplainer(best_reg)
+else:
+    explainer_r = shap.Explainer(best_reg, X_train)
 
-# For each drug, compute mean |SHAP| across its rows, then top-10 features
+# compute SHAP on the full test set (so grouping by drug uses exact test indices)
+# If X_test is large and you worry about runtime, you can still compute for full X_test but may subsample per-drug later.
+shap_values_r = explainer_r.shap_values(X_test) 
+# Ensure numpy array shape (N, F)
+shap_arr = np.asarray(shap_values_r)
+abs_shap = np.abs(shap_arr)  # shape: (N, F)
+
+# ---------- Task 4a: Per-drug Top-10 by mean |SHAP| (on X_test) ----------
 drug_top10 = {}
-for drug_name, idxs in meta_test.groupby("drug").groups.items():
-    idxs = list(idxs)
+# meta_test has index 0..N_test-1 now
+groups = meta_test.groupby("drug").groups
+for drug_name, idxs in groups.items():
+    idxs = list(idxs)  # positions inside X_test / abs_shap
     if len(idxs) == 0:
         continue
-    mean_abs = abs_shap[idxs, :].mean(axis=0)
+    mean_abs = abs_shap[idxs, :].mean(axis=0)   # mean across samples of that drug
     top_idx = np.argsort(mean_abs)[::-1][:10]
-    drug_top10[drug_name] = [(feature_names[i], float(mean_abs[i])) for i in top_idx]
+    drug_top10[drug_name] = [(X.columns[i], float(mean_abs[i])) for i in top_idx]
 
+# Print per-drug top-10
 print("\n=== Per-drug Top-10 Features by mean |SHAP| (on test set) ===")
 for d, feats in drug_top10.items():
     print(f"\n{d}:")
     for f, val in feats:
         print(f"  {f:30s}  {val:.6f}")
 
-# ---------- Least prediction error pair & its top-10 features (Task 4b) ----------
+# ---------- Task 4b: least-error drug-cell pair and its top-10 ----------
 y_pred = best_reg.predict(X_test)
 errors = np.abs(y_pred - y_test)
-min_idx = int(np.argmin(errors))
-pair = (meta_test.iloc[min_idx]["drug"], meta_test.iloc[min_idx]["cell_line"])
+min_idx = int(np.argmin(errors))   # index into X_test / meta_test
+pair = (meta_test.loc[min_idx, "drug"], meta_test.loc[min_idx, "cell_line"])
 print(f"\nLeast prediction error sample: drug={pair[0]}, cell_line={pair[1]}")
 print(f"True LN_IC50={y_test[min_idx]:.4f}, Pred={y_pred[min_idx]:.4f}, AbsError={errors[min_idx]:.6f}")
 
-row_shap = shap_values_r[min_idx, :]
+row_shap = shap_arr[min_idx, :]     # signed shap values for that sample
 order = np.argsort(np.abs(row_shap))[::-1][:10]
-pair_top10 = [(feature_names[i], float(row_shap[i])) for i in order]
+pair_top10 = [(X.columns[i], float(row_shap[i])) for i in order]
 
 print("\nTop-10 features for least-error pair (signed SHAP):")
 for f, val in pair_top10:
     print(f"  {f:30s}  SHAP={val:.6f}")
 
-# Optional: a force plot image for this pair
+# optional: force plot (matplotlib)
 shap.force_plot(
     explainer_r.expected_value,
     row_shap,
-    X_test.iloc[min_idx, :],
-    feature_names=feature_names,
+    X_test.loc[min_idx, :],
+    feature_names=X.columns.tolist(),
     matplotlib=True,
     show=False
 )

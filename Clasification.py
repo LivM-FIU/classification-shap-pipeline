@@ -283,7 +283,7 @@ for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
     top_idx = np.argsort(mean_abs)[::-1][:10]
     print(f"\n{cname}:")
     for i in top_idx:
-        print(f"  {X.columns[i]:30s}  {mean_abs[i]:.6f}")
+        print(f"  {str(X.columns[i]):30s}  {mean_abs[i]:.6f}")
 
 
 # -------- FORCE PLOTS --------
