@@ -6,3 +6,4 @@
 plots/
 *.png
 .DS_Store
+*catboost_info

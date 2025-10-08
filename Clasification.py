@@ -1,12 +1,15 @@
 # ==============================
 # CLASSIFICATION PIPELINE (All Models Use SHAP TreeExplainer)
 # ==============================
+import os, sys
+
 import os, time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import shap
 
+import cupy as cp
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import accuracy_score, f1_score
@@ -20,6 +23,7 @@ GPU_ID = 0
 TARGET_ID = "TCGA-39-5011-01A"  # Patient ID for SHAP visualization
 
 def minutes(sec): return sec / 60.0
+
 
 # -------- LOAD DATA --------
 df = pd.read_csv("lncRNA_5_Cancers.csv")
@@ -47,25 +51,32 @@ def build_models(use_gpu=True, gpu_id=0):
     models = {
         "DecisionTree": DecisionTreeClassifier(random_state=42),
         "RandomForest": RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=-1),
-        "GBM": GradientBoostingClassifier(random_state=42),
         "XGBoost": XGBClassifier(
-            n_estimators=400, learning_rate=0.05, max_depth=6,
-            subsample=0.9, colsample_bytree=0.9, random_state=42, n_jobs=-1,
+            n_estimators=200,
+            learning_rate=0.05,
+            max_depth=6,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            random_state=42,
+            n_jobs=-1,
             eval_metric="mlogloss",
-            tree_method="gpu_hist" if use_gpu else "hist",
-            predictor="gpu_predictor" if use_gpu else "cpu_predictor",
-            gpu_id=gpu_id if use_gpu else None,
+            tree_method="hist",                # GPU hist is deprecated
+            device="cuda" if use_gpu else "cpu"
         ),
         "LightGBM": LGBMClassifier(
-            n_estimators=600, learning_rate=0.05, num_leaves=64,
+            n_estimators=200, learning_rate=0.05, num_leaves=64,
             subsample=0.9, colsample_bytree=0.9, random_state=42,
-            device_type="gpu" if use_gpu else "cpu"
+            device_type="gpu" if use_gpu else "cpu", verbosity=-1
         ),
         "CatBoost": CatBoostClassifier(
-            iterations=600, learning_rate=0.05, depth=6,
+            iterations=100, learning_rate=0.05, depth=6,
             random_seed=42, verbose=False, loss_function="MultiClass",
             task_type="GPU" if use_gpu else "CPU", devices=str(gpu_id)
-        )
+        ),
+        "GBM": GradientBoostingClassifier(n_estimators=200, learning_rate=0.05,
+            max_depth=6, subsample=0.9, max_features=0.2,
+            validation_fraction=0.1, n_iter_no_change=10,
+            random_state=42)
     }
     return models
 
@@ -75,6 +86,21 @@ except Exception as e:
     print(f"[GPU init warning] Fallback to CPU: {e}")
     models = build_models(False, GPU_ID)
 
+def xgb_predict_labels(model, X_te, n_classes):
+    """Keep XGBoost prediction on GPU; fallback to CPU if needed."""
+    try:
+        booster = model.get_booster()
+        cp_X = cp.asarray(X_te.values if hasattr(X_te, "values") else np.asarray(X_te))
+        proba = booster.inplace_predict(cp_X, predict_type="value")  # on-GPU
+        proba = cp.asnumpy(proba)
+        if n_classes > 2:
+            return np.argmax(proba, axis=1)
+        else:
+            return (proba > 0.5).astype(int)
+    except Exception:
+        # if CuPy not available or any issue, fall back
+        return model.predict(X_te)
+    
 # -------- 5-FOLD CROSS-VALIDATION --------
 cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 results = {}
@@ -97,7 +123,11 @@ for name, base_model in models.items():
         model = clone(base_model)
         model.fit(X_tr, y_tr)
 
-        y_pred = model.predict(X_te)
+        # --- GPU-safe prediction for XGBoost ---
+        if name == "XGBoost" and model.get_params().get("device") == "cuda":
+            y_pred = xgb_predict_labels(model, X_te, n_classes=len(classes))
+        else:
+            y_pred = model.predict(X_te)
         acc, f1m = accuracy_score(y_te, y_pred), f1_score(y_te, y_pred, average="macro")
         fold_accs.append(acc)
         fold_f1s.append(f1m)
@@ -139,7 +169,7 @@ print("\n▶ Computing SHAP values with TreeExplainer for all models (uniform me
 shap_start = time.perf_counter()
 
 # Passing the model lets TreeExplainer trace how each feature influences output.
-explainer = shap.TreeExplainer(best_clf, model_output="probability")
+explainer = shap.TreeExplainer(best_clf, model_output="probability", feature_perturbation='interventional')
 shap_values = explainer.shap_values(X)
 base_values = explainer.expected_value
 
