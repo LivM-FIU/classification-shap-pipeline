@@ -156,16 +156,16 @@ print(f"\nTotal training time (all models): {minutes(overall_time):.2f} min")
 # Pick best model
 best_name = res_df.index[0]
 best_clf = models[best_name]
-print(f"\n🏆 Best model: {best_name}")
+print(f"\n Best model: {best_name}")
 
 # -------- FINAL TRAIN (100% DATA) --------
-print(f"\n▶ Fitting {best_name} on full dataset...")
+print(f"\n Fitting {best_name} on full dataset...")
 t0 = time.perf_counter()
 best_clf.fit(X, y_enc)
-print(f"⏱ Final training took {minutes(time.perf_counter()-t0):.2f} min")
+print(f" Final training took {minutes(time.perf_counter()-t0):.2f} min")
 
 # -------- SHAP FOR ALL MODELS --------
-print("\n▶ Computing SHAP values with TreeExplainer for all models (uniform method)...")
+print("\n Computing SHAP values with TreeExplainer for all models (uniform method)...")
 shap_start = time.perf_counter()
 
 # Passing the model lets TreeExplainer trace how each feature influences output.
@@ -173,7 +173,7 @@ explainer = shap.TreeExplainer(best_clf, model_output="probability", feature_per
 shap_values = explainer.shap_values(X)
 base_values = explainer.expected_value
 
-print(f"⏱ SHAP computation took {(time.perf_counter()-shap_start)/60:.2f} min")
+print(f" SHAP computation took {(time.perf_counter()-shap_start)/60:.2f} min")
 
 # Normalize to consistent shape
 if isinstance(shap_values, list):
@@ -201,7 +201,7 @@ else:
     print(f"[Note] {TARGET_ID} not found; using row 0 instead.")
 
 os.makedirs("plots", exist_ok=True)
-print(f"\n▶ Generating force plots for {sample_ids[row_idx]} ...")
+print(f"\n Generating force plots for {sample_ids[row_idx]} ...")
 
 for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
     shap.force_plot(
@@ -217,4 +217,4 @@ for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
     plt.savefig(f"plots/force_{sample_ids[row_idx]}_{cname}.png", dpi=150)
     plt.close()
 
-print("\n✅ Saved SHAP force plots for all classes to ./plots/")
+print("\n Saved SHAP force plots for all classes to ./plots/")
