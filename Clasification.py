@@ -283,8 +283,10 @@ for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
     top_idx = np.argsort(mean_abs)[::-1][:10]
     print(f"\n{cname}:")
     for i in top_idx:
-        print(f"  {str(X.columns[i]):30s}  {mean_abs[i]:.6f}")
-
+        val = mean_abs[i]
+        if isinstance(val, np.ndarray):
+            val = float(val.mean())  # safely flatten to a scalar
+        print(f"  {str(X.columns[i]):30s}  {val:.6f}")
 
 # -------- FORCE PLOTS --------
 if TARGET_ID in sample_ids:
