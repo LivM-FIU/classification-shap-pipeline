@@ -18,7 +18,6 @@ from catboost import CatBoostRegressor
 gdsc = pd.read_csv("hw3-drug-screening-data.csv")  # Update path if needed
 
 id_cols = ["CELL_LINE_NAME", "DRUG_NAME"]
-assert all(c in gdsc.columns for c in id_cols + ["LN_IC50"]), "Missing required columns."
 
 y = gdsc["LN_IC50"].values
 meta = gdsc[id_cols].copy()
@@ -28,7 +27,7 @@ feature_names = X.columns.tolist()
 # ---------- Define models ----------
 regressors = {
     "DecisionTree": DecisionTreeRegressor(random_state=42),
-    "RandomForest": RandomForestRegressor(n_estimators=400, random_state=42, n_jobs=-1),
+    "RandomForest": RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1),
     "GBM": GradientBoostingRegressor(random_state=42),
     "XGBoost": XGBRegressor(
         n_estimators=200, learning_rate=0.05, max_depth=6,
