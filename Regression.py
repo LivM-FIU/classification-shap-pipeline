@@ -27,7 +27,7 @@ from catboost import CatBoostRegressor
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# ---- single plots directory ----
+# Single plots directory
 os.makedirs("plots", exist_ok=True)
 
 # -------- CONFIG --------
@@ -37,8 +37,10 @@ GPU_ID = 0
 N_FOLDS = 5
 RANDOM_STATE = 42
 
-def minutes(sec): return sec / 60.0
+# For SHAP decision plot speed/readability
+MAX_POINTS_FOR_DECISION = 600
 
+def minutes(sec): return sec / 60.0
 def safe_name(s: str) -> str:
     return re.sub(r'[^A-Za-z0-9_.-]+', '_', str(s)).strip('_')
 
@@ -60,26 +62,12 @@ print(f"Feature matrix: {X.shape[0]} × {X.shape[1]}")
 # -------- DEFINE MODELS --------
 def build_models(use_gpu=True, gpu_id=0):
     models = {
-        # Uncomment any you want to include
+        # Uncomment any others you want
         # "DecisionTree": DecisionTreeRegressor(random_state=RANDOM_STATE),
-        # "RandomForest": RandomForestRegressor(
-        #     n_estimators=100, max_depth=15, n_jobs=-1, random_state=RANDOM_STATE
-        # ),
-        # "GBM": GradientBoostingRegressor(
-        #     n_estimators=200, learning_rate=0.05, max_depth=6,
-        #     subsample=0.9, max_features=0.3, random_state=RANDOM_STATE
-        # ),
-        # "XGBoost": XGBRegressor(
-        #     n_estimators=200, learning_rate=0.05, max_depth=6,
-        #     subsample=0.9, colsample_bytree=0.9, random_state=RANDOM_STATE,
-        #     n_jobs=-1, tree_method="hist",
-        #     device="cuda" if use_gpu else "cpu"
-        # ),
-        # "LightGBM": LGBMRegressor(
-        #     n_estimators=200, learning_rate=0.05, num_leaves=64,
-        #     subsample=0.9, colsample_bytree=0.9, random_state=RANDOM_STATE,
-        #     device_type="gpu" if use_gpu else "cpu", verbosity=-1
-        # ),
+        # "RandomForest": RandomForestRegressor(n_estimators=100, max_depth=15, n_jobs=-1, random_state=RANDOM_STATE),
+        # "GBM": GradientBoostingRegressor(n_estimators=200, learning_rate=0.05, max_depth=6, subsample=0.9, max_features=0.3, random_state=RANDOM_STATE),
+        # "XGBoost": XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=6, subsample=0.9, colsample_bytree=0.9, random_state=RANDOM_STATE, n_jobs=-1, tree_method="hist", device="cuda" if use_gpu else "cpu"),
+        # "LightGBM": LGBMRegressor(n_estimators=200, learning_rate=0.05, num_leaves=64, subsample=0.9, colsample_bytree=0.9, random_state=RANDOM_STATE, device_type="gpu" if use_gpu else "cpu", verbosity=-1),
         "CatBoost": CatBoostRegressor(
             iterations=200, learning_rate=0.05, depth=6,
             random_seed=RANDOM_STATE, verbose=False, loss_function="RMSE",
@@ -165,13 +153,9 @@ for i, metric in enumerate(metrics_plot):
 plt.xticks(x, cv_df.index, rotation=15, ha="right")
 plt.ylabel("Metric Value")
 plt.title("Cross-Validated Mean Metrics by Regressor")
-
-# Dynamic Y-axis: up to 1.5 × maximum value found
 y_max = cv_df[metrics_plot].max().max() * 1.5
 plt.ylim(0, y_max)
-
 plt.legend(loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=4, frameon=False)
-
 plt.tight_layout()
 plt.savefig("plots/metrics_bar_regression.png", dpi=150, bbox_inches="tight")
 plt.close()
@@ -229,7 +213,7 @@ for drug, feats in drug_top10.items():
     if not feats:
         continue
     names, vals = zip(*feats)  # 10 names, 10 values
-    plt.figure(figsize=(8, 5))
+    plt.figure(figsize=(10, 7))
     y_pos = np.arange(len(names))[::-1]
     plt.barh(y_pos, vals[::-1])
     plt.yticks(y_pos, [names[i] for i in range(len(names)-1, -1, -1)])
@@ -259,10 +243,10 @@ print("\nTop-10 features for least-error pair (signed SHAP):")
 for f, val in pair_top10:
     print(f"  {f:30s}  SHAP={val:.6f}")
 
-# ---- (b) PLOT: Least-error signed SHAP ----
+# ---- (b) PLOT: Least-error signed SHAP (names left, bigger fig) ----
 top_feats  = [feature_names[i] for i in order]
 top_shaps  = [float(row_shap[i]) for i in order]
-plt.figure(figsize=(8, 5))
+plt.figure(figsize=(10, 7))
 y_pos = np.arange(len(top_feats))[::-1]
 plt.barh(y_pos, top_shaps[::-1])  # signed SHAP values
 plt.yticks(y_pos, [top_feats[i] for i in range(len(top_feats)-1, -1, -1)])
@@ -274,21 +258,71 @@ plt.savefig(out_signed, dpi=150)
 plt.close()
 print(f"Saved least-error signed SHAP plot: {out_signed}")
 
-# -------- FORCE PLOT (use .iloc) --------
-plt.figure()
-shap.force_plot(
-    explainer.expected_value,
-    row_shap,
-    X_test.iloc[min_pos, :],
+# -------- GLOBAL & LOCAL SHAP VISUALS WITH LABELS ON LEFT --------
+# Global beeswarm (feature names on left)
+plt.figure(figsize=(12, 8))
+shap.summary_plot(shap_arr, X_test, feature_names=feature_names, show=False)
+plt.tight_layout()
+plt.savefig("plots/summary_beeswarm.png", dpi=150, bbox_inches="tight")
+plt.close()
+print("Saved global SHAP summary beeswarm → plots/summary_beeswarm.png")
+
+# Global decision plot (subsample for speed + ignore_warnings)
+n = shap_arr.shape[0]
+if n > MAX_POINTS_FOR_DECISION:
+    rng = np.random.default_rng(42)
+    keep = np.sort(rng.choice(n, size=MAX_POINTS_FOR_DECISION, replace=False))
+    shap_arr_plot = shap_arr[keep, :]
+else:
+    shap_arr_plot = shap_arr
+
+plt.figure(figsize=(14, 8))
+shap.decision_plot(
+    base_value=explainer.expected_value,   # scalar for regression
+    shap_values=shap_arr_plot,
     feature_names=feature_names,
-    matplotlib=True,
+    ignore_warnings=True,                  # don't abort for large N
     show=False
 )
-plt.title(f"Force Plot — {safe_name(pair[0])} | {safe_name(pair[1])}")
+plt.title(f"Global SHAP Decision Plot (n={shap_arr_plot.shape[0]})")
 plt.tight_layout()
-plt.savefig(f"plots/force_{safe_name(pair[0])}_{safe_name(pair[1])}.png", dpi=150)
+plt.savefig("plots/decision_global.png", dpi=150, bbox_inches="tight")
 plt.close()
-print("Saved SHAP force plot for least-error pair.")
+print("Saved global SHAP decision plot → plots/decision_global.png")
+
+# Local waterfall (names on left, clean stacking)
+try:
+    # Newer SHAP: shap.plots.waterfall with Explanation is preferred, but legacy works widely:
+    from shap.plots._waterfall import waterfall_legacy
+    plt.figure(figsize=(12, 8))
+    waterfall_legacy(
+        explainer.expected_value,
+        row_shap,
+        feature_names=feature_names,
+        max_display=20,
+        show=False
+    )
+    plt.title(f"Waterfall — Least-error: {pair[0]} | {pair[1]}")
+    plt.tight_layout()
+    plt.savefig(f"plots/waterfall_{safe_name(pair[0])}_{safe_name(pair[1])}.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    print("Saved local SHAP waterfall → plots/waterfall_*.png")
+except Exception:
+    # Fallback to force plot (single-sample) if waterfall not available
+    plt.figure(figsize=(12, 4))
+    shap.force_plot(
+        explainer.expected_value,
+        row_shap,
+        X_test.iloc[min_pos, :],
+        feature_names=feature_names,
+        matplotlib=True,
+        show=False
+    )
+    plt.title(f"Force Plot — Least-error: {safe_name(pair[0])} | {safe_name(pair[1])}")
+    plt.tight_layout()
+    plt.savefig(f"plots/force_{safe_name(pair[0])}_{safe_name(pair[1])}.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    print("Saved local SHAP force plot (fallback).")
 
 # -------- SAVE RESULTS --------
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
