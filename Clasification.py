@@ -64,38 +64,39 @@ def build_models(use_gpu=True, gpu_id=0):
     from catboost import CatBoostClassifier
 
     models = {
-        "DecisionTree": DecisionTreeClassifier(random_state=42),
-        "RandomForest": RandomForestClassifier(
-            n_estimators=300, random_state=42, n_jobs=-1
-        ),
-        "XGBoost": XGBClassifier(
-            n_estimators=200,
-            learning_rate=0.05,
-            max_depth=6,
-            subsample=0.9,
-            colsample_bytree=0.9,
-            random_state=42,
-            n_jobs=-1,
-            eval_metric="mlogloss",
-            tree_method="hist",                # use 'hist'; GPU enabled via device
-            device="cuda" if use_gpu else "cpu"
-        ),
+        # "DecisionTree": DecisionTreeClassifier(random_state=42),
+        # "RandomForest": RandomForestClassifier(
+        #     n_estimators=300, random_state=42, n_jobs=-1
+        # ),
+        # "XGBoost": XGBClassifier(
+        #     n_estimators=200,
+        #     learning_rate=0.05,
+        #     max_depth=6,
+        #     subsample=0.9,
+        #     colsample_bytree=0.9,
+        #     random_state=42,
+        #     n_jobs=-1,
+        #     eval_metric="mlogloss",
+        #     tree_method="hist",                # use 'hist'; GPU enabled via device
+        #     device="cuda" if use_gpu else "cpu"
+        # ),
         "LightGBM": LGBMClassifier(
             n_estimators=200, learning_rate=0.05, num_leaves=64,
             subsample=0.9, colsample_bytree=0.9, random_state=42,
             device_type="gpu" if use_gpu else "cpu", verbosity=-1
-        ),
-        "CatBoost": CatBoostClassifier(
-            iterations=100, learning_rate=0.05, depth=6,
-            random_seed=42, verbose=False, loss_function="MultiClass",
-            task_type="GPU" if use_gpu else "CPU", devices=str(gpu_id)
-        ),
-        "GBM": GradientBoostingClassifier(
-            n_estimators=200, learning_rate=0.05,
-            max_depth=6, subsample=0.9, max_features=0.2,
-            validation_fraction=0.1, n_iter_no_change=10,
-            random_state=42
         )
+        # ,
+        # "CatBoost": CatBoostClassifier(
+        #     iterations=100, learning_rate=0.05, depth=6,
+        #     random_seed=42, verbose=False, loss_function="MultiClass",
+        #     task_type="GPU" if use_gpu else "CPU", devices=str(gpu_id)
+        # ),
+        # "GBM": GradientBoostingClassifier(
+        #     n_estimators=200, learning_rate=0.05,
+        #     max_depth=6, subsample=0.9, max_features=0.2,
+        #     validation_fraction=0.1, n_iter_no_change=10,
+        #     random_state=42
+        # )
     }
     return models
 

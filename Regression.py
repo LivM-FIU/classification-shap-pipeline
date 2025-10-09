@@ -26,7 +26,9 @@ from lightgbm import LGBMRegressor
 from catboost import CatBoostRegressor
 
 warnings.filterwarnings("ignore", category=UserWarning)
-os.makedirs("plots_regression", exist_ok=True)
+
+# ---- single plots directory ----
+os.makedirs("plots", exist_ok=True)
 
 # -------- CONFIG --------
 DATA_PATH = "hw3-drug-screening-data.csv"
@@ -58,28 +60,26 @@ print(f"Feature matrix: {X.shape[0]} × {X.shape[1]}")
 # -------- DEFINE MODELS --------
 def build_models(use_gpu=True, gpu_id=0):
     models = {
-        "DecisionTree": DecisionTreeRegressor(random_state=RANDOM_STATE),
-        "RandomForest": RandomForestRegressor(
-            n_estimators=100,
-            max_depth=15,
-            n_jobs=-1,
-            random_state=RANDOM_STATE
-        ),
-        "GBM": GradientBoostingRegressor(
-            n_estimators=200, learning_rate=0.05, max_depth=6,
-            subsample=0.9, max_features=0.3, random_state=RANDOM_STATE
-        ),
-        "XGBoost": XGBRegressor(
-            n_estimators=200, learning_rate=0.05, max_depth=6,
-            subsample=0.9, colsample_bytree=0.9, random_state=RANDOM_STATE,
-            n_jobs=-1, tree_method="hist",
-            device="cuda" if use_gpu else "cpu"
-        ),
-        "LightGBM": LGBMRegressor(
-            n_estimators=200, learning_rate=0.05, num_leaves=64,
-            subsample=0.9, colsample_bytree=0.9, random_state=RANDOM_STATE,
-            device_type="gpu" if use_gpu else "cpu", verbosity=-1
-        ),
+        # Uncomment any you want to include
+        # "DecisionTree": DecisionTreeRegressor(random_state=RANDOM_STATE),
+        # "RandomForest": RandomForestRegressor(
+        #     n_estimators=100, max_depth=15, n_jobs=-1, random_state=RANDOM_STATE
+        # ),
+        # "GBM": GradientBoostingRegressor(
+        #     n_estimators=200, learning_rate=0.05, max_depth=6,
+        #     subsample=0.9, max_features=0.3, random_state=RANDOM_STATE
+        # ),
+        # "XGBoost": XGBRegressor(
+        #     n_estimators=200, learning_rate=0.05, max_depth=6,
+        #     subsample=0.9, colsample_bytree=0.9, random_state=RANDOM_STATE,
+        #     n_jobs=-1, tree_method="hist",
+        #     device="cuda" if use_gpu else "cpu"
+        # ),
+        # "LightGBM": LGBMRegressor(
+        #     n_estimators=200, learning_rate=0.05, num_leaves=64,
+        #     subsample=0.9, colsample_bytree=0.9, random_state=RANDOM_STATE,
+        #     device_type="gpu" if use_gpu else "cpu", verbosity=-1
+        # ),
         "CatBoost": CatBoostRegressor(
             iterations=200, learning_rate=0.05, depth=6,
             random_seed=RANDOM_STATE, verbose=False, loss_function="RMSE",
@@ -176,7 +176,6 @@ plt.tight_layout()
 plt.savefig("plots/metrics_bar_regression.png", dpi=150, bbox_inches="tight")
 plt.close()
 print(" Saved regression metrics bar chart → plots/metrics_bar_regression.png")
-
 
 # -------- BEST MODEL SELECTION --------
 best_name = cv_df.index[0]
