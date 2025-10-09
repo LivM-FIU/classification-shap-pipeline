@@ -26,7 +26,7 @@ from lightgbm import LGBMRegressor
 from catboost import CatBoostRegressor
 
 warnings.filterwarnings("ignore", category=UserWarning)
-os.makedirs("plots", exist_ok=True)
+os.makedirs("plots_regression", exist_ok=True)
 
 # -------- CONFIG --------
 DATA_PATH = "hw3-drug-screening-data.csv"
@@ -43,7 +43,7 @@ def safe_name(s: str) -> str:
 # -------- LOAD DATA --------
 start_total = time.perf_counter()
 gdsc = pd.read_csv(DATA_PATH)
-print(f"✅ Data loaded: {gdsc.shape[0]} samples × {gdsc.shape[1]} columns")
+print(f"Data loaded: {gdsc.shape[0]} samples × {gdsc.shape[1]} columns")
 
 id_cols = ["CELL_LINE_NAME", "DRUG_NAME"]
 assert all(c in gdsc.columns for c in id_cols + ["LN_IC50"]), "Missing required columns."
@@ -53,7 +53,7 @@ meta = gdsc[id_cols].copy()
 X = gdsc.drop(columns=id_cols + ["LN_IC50"]).apply(pd.to_numeric, errors="coerce")
 X = X.fillna(X.median(numeric_only=True)).astype(np.float32)
 feature_names = X.columns.tolist()
-print(f"✅ Feature matrix: {X.shape[0]} × {X.shape[1]}")
+print(f"Feature matrix: {X.shape[0]} × {X.shape[1]}")
 
 # -------- DEFINE MODELS --------
 def build_models(use_gpu=True, gpu_id=0):
@@ -91,7 +91,7 @@ def build_models(use_gpu=True, gpu_id=0):
 try:
     regressors = build_models(USE_GPU, GPU_ID)
 except Exception as e:
-    print(f"[⚠️ GPU init warning] Fallback to CPU: {e}")
+    print(f"[ GPU init warning] Fallback to CPU: {e}")
     regressors = build_models(False, GPU_ID)
 
 # -------- CROSS-VALIDATION WITH FOLD METRICS --------
@@ -100,7 +100,7 @@ results = {}
 
 for name, model in regressors.items():
     print("\n" + "=" * 90)
-    print(f"🚀 Training model: {name}")
+    print(f" Training model: {name}")
     print("-" * 90)
     model_start = time.perf_counter()
 
@@ -136,7 +136,7 @@ for name, model in regressors.items():
     }
 
     print("-" * 90)
-    print(f"✅ Mean across {N_FOLDS} folds: "
+    print(f" Mean across {N_FOLDS} folds: "
           f"MAE={np.mean(fold_mae):.4f}±{np.std(fold_mae):.4f}, "
           f"MSE={np.mean(fold_mse):.4f}, RMSE={np.mean(fold_rmse):.4f}, "
           f"R²={np.mean(fold_r2):.4f}")
@@ -148,11 +148,11 @@ cv_df = pd.DataFrame(results).T.sort_values(
     by=["RMSE_mean", "MAE_mean", "R2_mean"],
     ascending=[True, True, False]
 )
-print("\n=== 📊 Cross-Validation Summary ===")
+print("\n=== Cross-Validation Summary ===")
 print(cv_df.round(4))
 print(f"\n⏱ Total experiment time: {minutes(time.perf_counter()-start_total):.2f} min")
 
-# -------- METRIC BAR CHART (fixed Y-axis 0–2.5, legend below) --------
+# -------- METRIC BAR CHART (Dynamic Y-axis scaling: 1.5× max value) --------
 metrics_plot = ["MAE_mean", "MSE_mean", "RMSE_mean", "R2_mean"]
 plt.figure(figsize=(10, 6))
 x = np.arange(len(cv_df))  # each model
@@ -166,13 +166,17 @@ plt.xticks(x, cv_df.index, rotation=15, ha="right")
 plt.ylabel("Metric Value")
 plt.title("Cross-Validated Mean Metrics by Regressor")
 
-plt.ylim(0, 2.5)
+# Dynamic Y-axis: up to 1.5 × maximum value found
+y_max = cv_df[metrics_plot].max().max() * 1.5
+plt.ylim(0, y_max)
+
 plt.legend(loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=4, frameon=False)
 
 plt.tight_layout()
 plt.savefig("plots/metrics_bar_regression.png", dpi=150, bbox_inches="tight")
 plt.close()
-print("💾 Saved regression metrics bar chart → plots/metrics_bar_regression.png")
+print(" Saved regression metrics bar chart → plots/metrics_bar_regression.png")
+
 
 # -------- BEST MODEL SELECTION --------
 best_name = cv_df.index[0]
@@ -192,11 +196,11 @@ mse = mean_squared_error(y_test, y_pred)
 rmse = np.sqrt(mse)
 r2 = r2_score(y_test, y_pred)
 
-print("\n=== 🧪 Final Test Metrics ===")
+print("\n=== Final Test Metrics ===")
 print(f"MAE={mae:.4f}, MSE={mse:.4f}, RMSE={rmse:.4f}, R²={r2:.4f}")
 
 # -------- SHAP ANALYSIS --------
-print("\n💡 Computing SHAP values for best model...")
+print("\nComputing SHAP values for best model...")
 background = shap.utils.sample(X_train, 200, random_state=42)
 explainer = shap.TreeExplainer(best_reg, data=background, feature_perturbation="interventional")
 shap_values = explainer.shap_values(X_test)
@@ -208,7 +212,7 @@ pos_of = {orig_idx: pos for pos, orig_idx in enumerate(X_test.index)}
 
 # -------- (a) Per-drug Top 10 (safe indexing) --------
 drug_top10 = {}
-print("\n=== 🔍 Per-Drug Top-10 Features by mean |SHAP| ===")
+print("\n=== Per-Drug Top-10 Features by mean |SHAP| ===")
 for drug, orig_idxs in meta_test.groupby("DRUG_NAME").groups.items():
     pos_idxs = [pos_of[i] for i in orig_idxs if i in pos_of]
     if not pos_idxs:
@@ -236,7 +240,7 @@ for drug, feats in drug_top10.items():
     out_path = f"plots/per_drug_top10_{safe_name(drug)}.png"
     plt.savefig(out_path, dpi=150)
     plt.close()
-    print(f"💾 Saved per-drug top-10 plot: {out_path}")
+    print(f"Saved per-drug top-10 plot: {out_path}")
 
 # -------- (b) Least-error sample (use .iloc for positional) --------
 errors = np.abs(y_pred - y_test)
@@ -269,7 +273,7 @@ plt.tight_layout()
 out_signed = f"plots/least_error_top10_{safe_name(pair[0])}_{safe_name(pair[1])}.png"
 plt.savefig(out_signed, dpi=150)
 plt.close()
-print(f"💾 Saved least-error signed SHAP plot: {out_signed}")
+print(f"Saved least-error signed SHAP plot: {out_signed}")
 
 # -------- FORCE PLOT (use .iloc) --------
 plt.figure()
@@ -285,7 +289,7 @@ plt.title(f"Force Plot — {safe_name(pair[0])} | {safe_name(pair[1])}")
 plt.tight_layout()
 plt.savefig(f"plots/force_{safe_name(pair[0])}_{safe_name(pair[1])}.png", dpi=150)
 plt.close()
-print("💾 Saved SHAP force plot for least-error pair.")
+print("Saved SHAP force plot for least-error pair.")
 
 # -------- SAVE RESULTS --------
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -317,5 +321,5 @@ for path in glob.glob(os.path.join("plots", "*.png")):
         pass
 pd.DataFrame(plot_paths).to_csv(os.path.join(res_dir, "generated_plots.csv"), index=False)
 
-print(f"\n📁 All results saved in: {os.path.abspath(res_dir)}")
-print(f"⏱ Total runtime: {minutes(time.perf_counter()-start_total):.2f} min")
+print(f"\nAll results saved in: {os.path.abspath(res_dir)}")
+print(f"Total runtime: {minutes(time.perf_counter()-start_total):.2f} min")
