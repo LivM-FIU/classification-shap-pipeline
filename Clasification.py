@@ -291,6 +291,23 @@ n_classes_out = sv_by_class.shape[0]
 if base_per_class.size == 1 and n_classes_out > 1:
     base_per_class = np.repeat(base_per_class[0], n_classes_out)
 
+# Align feature names with SHAP output dimensionality
+n_shap_features = sv_by_class.shape[-1]
+explainer_feature_names = getattr(explainer, "feature_names", None)
+
+if explainer_feature_names is not None and len(explainer_feature_names) == n_shap_features:
+    feature_names = list(explainer_feature_names)
+elif len(feature_names) != n_shap_features:
+    print(
+        f"[Warning] Adjusting feature name list length ({len(feature_names)}) to match "
+        f"SHAP outputs ({n_shap_features})."
+    )
+    feature_names = feature_names[:n_shap_features]
+    if len(feature_names) < n_shap_features:
+        feature_names.extend([
+            f"shap_feature_{idx}" for idx in range(len(feature_names), n_shap_features)
+        ])
+
 # -------- TOP 10 FEATURES PER CLASS --------
 print("\n=== Per-Class Top 10 Features by mean |SHAP| ===")
 
@@ -319,7 +336,7 @@ for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
     class_sample_counts[cname] = int(class_mask.sum())
     class_shap = shap_matrix[class_mask]
     mean_abs = np.abs(class_shap).mean(axis=0)
-    class_feature_means[cname] = mean_abs
+    class_feature_means[cname] = pd.Series(mean_abs[:len(feature_names)], index=feature_names)
 
     top_idx = np.argsort(mean_abs)[::-1][:10]
 
@@ -344,10 +361,8 @@ print(f"\nSaved per-class Top-10 SHAP table -> {per_class_csv_temp}")
 # -------- COHORT-WIDE FEATURE IMPORTANCE BARPLOT --------
 if class_feature_means:
     class_order = [c for c in classes if c in class_feature_means]
-    class_mean_df = pd.DataFrame(
-        {cname: class_feature_means[cname] for cname in class_order},
-        index=feature_names
-    )
+    class_mean_df = pd.DataFrame({cname: class_feature_means[cname] for cname in class_order})
+    class_mean_df.index.name = "feature"
 
     # Cohort mean importance (mean across class-wise averages)
     class_mean_df["cohort_mean_abs_shap"] = class_mean_df.mean(axis=1)
