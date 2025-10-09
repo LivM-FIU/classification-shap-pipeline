@@ -301,16 +301,26 @@ if len(y_enc) != N:
     y_enc = np.array(y_enc[:N])
 
 top10_rows = []
+class_feature_means = {}
+class_sample_counts = {}
 for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
-    mask = (y_enc == cidx)
-    if not np.any(mask):
+    class_mask = (y_enc == cidx)
+    shap_matrix = sv_by_class[cidx]
+
+    # Align shapes defensively if SHAP truncated/expanded samples
+    max_len = min(len(class_mask), shap_matrix.shape[0])
+    class_mask = class_mask[:max_len]
+    shap_matrix = shap_matrix[:max_len]
+
+    if not np.any(class_mask):
         print(f"\n{cname}: [no samples in this class subset]")
         continue
 
-    # Ensure mask and sv_by_class[cidx] align in length
-    mask = mask[:sv_by_class[cidx].shape[0]]
+    class_sample_counts[cname] = int(class_mask.sum())
+    class_shap = shap_matrix[class_mask]
+    mean_abs = np.abs(class_shap).mean(axis=0)
+    class_feature_means[cname] = mean_abs
 
-    mean_abs = np.abs(sv_by_class[cidx][mask]).mean(axis=0)
     top_idx = np.argsort(mean_abs)[::-1][:10]
 
     print(f"\n{cname}:")
@@ -330,6 +340,56 @@ os.makedirs("tables", exist_ok=True)
 per_class_csv_temp = "tables/per_class_top10_shap.csv"
 pd.DataFrame(top10_rows).to_csv(per_class_csv_temp, index=False)
 print(f"\nSaved per-class Top-10 SHAP table -> {per_class_csv_temp}")
+
+# -------- COHORT-WIDE FEATURE IMPORTANCE BARPLOT --------
+if class_feature_means:
+    class_order = [c for c in classes if c in class_feature_means]
+    class_mean_df = pd.DataFrame(
+        {cname: class_feature_means[cname] for cname in class_order},
+        index=feature_names
+    )
+
+    # Cohort mean importance (mean across class-wise averages)
+    class_mean_df["cohort_mean_abs_shap"] = class_mean_df.mean(axis=1)
+    cohort_top_features = (
+        class_mean_df["cohort_mean_abs_shap"].sort_values(ascending=False).head(10).index
+    )
+
+    cohort_top_df = class_mean_df.loc[cohort_top_features]
+    cohort_top_df = cohort_top_df.sort_values("cohort_mean_abs_shap", ascending=True)
+
+    cohort_table_path = "tables/cohort_feature_importance.csv"
+    cohort_top_df.to_csv(cohort_table_path, index_label="feature")
+    print(f"Saved cohort-level feature importance table -> {cohort_table_path}")
+
+    plt.figure(figsize=(12, 7))
+    y_pos = np.arange(len(cohort_top_df))
+    left = np.zeros(len(cohort_top_df))
+    color_map = plt.cm.get_cmap("tab10", len(class_order))
+
+    for cidx, cname in enumerate(class_order):
+        contrib = cohort_top_df[cname].values
+        plt.barh(
+            y_pos,
+            contrib,
+            left=left,
+            color=color_map(cidx),
+            edgecolor="black",
+            label=f"{cname} (n={class_sample_counts.get(cname, 0)})"
+        )
+        left += contrib
+
+    plt.yticks(y_pos, cohort_top_df.index)
+    plt.xlabel("Mean |SHAP| attribution")
+    plt.title("Top 10 Features – Cohort-wide Class Contributions")
+    plt.legend(loc="lower right", frameon=True)
+    plt.tight_layout()
+    cohort_plot_path = "plots/cohort_feature_importance.png"
+    plt.savefig(cohort_plot_path, dpi=150)
+    plt.close()
+    print(f"Saved cohort feature importance bar plot -> {cohort_plot_path}")
+else:
+    print("[Warning] Could not compute cohort bar plot because no class SHAP summaries were available.")
 
 # -------- FORCE PLOTS --------
 if TARGET_ID in sample_ids:
@@ -375,10 +435,16 @@ folds_csv_path = os.path.join(results_dir, "fold_scores_raw.csv")
 folds_df.to_csv(folds_csv_path, index=False)
 print(f"Saved per-fold raw metrics -> {folds_csv_path}")
 
-# 3) Save per-class SHAP table
+# 3) Save SHAP tables
 per_class_csv_path = os.path.join(results_dir, "per_class_top10_shap.csv")
 shutil.copy2(per_class_csv_temp, per_class_csv_path)
 print(f"Saved per-class Top-10 SHAP -> {per_class_csv_path}")
+
+cohort_table_temp = "tables/cohort_feature_importance.csv"
+if os.path.exists(cohort_table_temp):
+    cohort_csv_path = os.path.join(results_dir, "cohort_feature_importance.csv")
+    shutil.copy2(cohort_table_temp, cohort_csv_path)
+    print(f"Saved cohort feature importance table -> {cohort_csv_path}")
 
 # 4) Copy plots
 plot_paths = []
