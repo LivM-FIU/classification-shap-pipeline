@@ -403,6 +403,39 @@ if class_feature_means:
     plt.savefig(cohort_plot_path, dpi=150)
     plt.close()
     print(f"Saved cohort feature importance bar plot -> {cohort_plot_path}")
+
+    # --- Per-class breakdown plots ---
+    per_class_plot_dir = os.path.join("plots", "per_class_feature_importance")
+    os.makedirs(per_class_plot_dir, exist_ok=True)
+
+    for cidx, cname in enumerate(class_order):
+        if cname not in class_feature_means:
+            continue
+
+        class_series = class_feature_means[cname].sort_values(ascending=False).head(10)
+        plt.figure(figsize=(10, 6))
+        y_pos = np.arange(len(class_series))
+        plt.barh(
+            y_pos,
+            class_series.values,
+            color=color_map(cidx),
+            edgecolor="black",
+        )
+        plt.yticks(y_pos, class_series.index)
+        plt.xlabel("Mean |SHAP| attribution (class-specific)")
+        plt.title(
+            "Top 10 Features – "
+            f"{cname} (n={class_sample_counts.get(cname, 0)})"
+        )
+        plt.tight_layout()
+
+        class_plot_path = os.path.join(
+            per_class_plot_dir,
+            f"feature_importance_{cname.replace(' ', '_')}.png"
+        )
+        plt.savefig(class_plot_path, dpi=150)
+        plt.close()
+        print(f"Saved per-class feature importance plot -> {class_plot_path}")
 else:
     print("[Warning] Could not compute cohort bar plot because no class SHAP summaries were available.")
 
@@ -414,8 +447,17 @@ else:
     print(f"[Note] {TARGET_ID} not found; using row 0 instead.")
 
 print(f"\nGenerating force plots for {sample_ids[row_idx]} ...")
+sample_row = X.iloc[[row_idx]]
+sample_proba = best_clf.predict_proba(sample_row)[0]
+
 for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
     base_val = float(base_per_class[cidx]) if base_per_class.ndim > 0 else float(base_per_class)
+    fx_val = float(sample_proba[cidx])
+    print(
+        f"  {cname}: base value (mean class probability) = {base_val:.6f}, "
+        f"f(x) = {fx_val:.6f}"
+    )
+
     shap.force_plot(
         base_val,
         sv_by_class[cidx][row_idx, :],
@@ -424,7 +466,7 @@ for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
         matplotlib=True,
         show=False
     )
-    plt.title(f"{sample_ids[row_idx]} — {cname}")
+    plt.title(f"{sample_ids[row_idx]} — {cname}\nBase={base_val:.4f}, f(x)={fx_val:.4f}")
     plt.tight_layout()
     out_path = f"plots/force_{sample_ids[row_idx]}_{cname}.png"
     plt.savefig(out_path, dpi=150)
