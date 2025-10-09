@@ -271,6 +271,7 @@ pos_of = {orig_idx: pos for pos, orig_idx in enumerate(X_test.index)}
 
 # -------- (a) Per-drug Top 10 (safe indexing) --------
 drug_top10 = {}
+force_panels = []
 print("\n=== Per-Drug Top-10 Features by mean |SHAP| ===")
 for drug, orig_idxs in meta_test.groupby("DRUG_NAME").groups.items():
     pos_idxs = [pos_of[i] for i in orig_idxs if i in pos_of]
@@ -286,20 +287,12 @@ for drug, orig_idxs in meta_test.groupby("DRUG_NAME").groups.items():
     for f, val in drug_top10[drug]:
         print(f"  {f:30s}  {val:.6f}")
 
-    plt.figure(figsize=(12, 0.5 * len(top_idx) + 1.5))
-    shap.force_plot(
-        expected_value,
-        mean_signed[top_idx],
-        mean_features[top_idx],
-        feature_names=[feature_names[i] for i in top_idx],
-        matplotlib=True,
-        show=False
-    )
-    drug_force_path = os.path.join(res_dir, f"force_per_drug_{safe_name(drug)}.png")
-    plt.tight_layout()
-    plt.savefig(drug_force_path, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"Saved per-drug force plot: {drug_force_path}")
+    force_panels.append({
+        "title": f"Per-drug mean SHAP — {drug}",
+        "shap_values": mean_signed[top_idx],
+        "feature_values": mean_features[top_idx],
+        "feature_names": [feature_names[i] for i in top_idx]
+    })
 
 # ---- (a) PLOTS: Per-drug Top-10 mean |SHAP| ----
 for drug, feats in drug_top10.items():
@@ -355,23 +348,31 @@ plt.savefig(out_signed, dpi=150)
 plt.close()
 print(f"Saved least-error signed SHAP plot: {out_signed}")
 
-plt.figure(figsize=(12, 6))
-shap.force_plot(
-    expected_value,
-    row_shap[order],
-    sample_values[order],
-    feature_names=[feature_names[i] for i in order],
-    matplotlib=True,
-    show=False
-)
-least_force_path = os.path.join(
-    res_dir,
-    f"force_least_error_{safe_name(pair[0])}_{safe_name(pair[1])}.png"
-)
-plt.tight_layout()
-plt.savefig(least_force_path, dpi=150, bbox_inches="tight")
-plt.close()
-print(f"Saved least-error force plot: {least_force_path}")
+force_panels.append({
+    "title": f"Least-error sample — {pair[0]} | {pair[1]}",
+    "shap_values": row_shap[order],
+    "feature_values": sample_values[order],
+    "feature_names": [feature_names[i] for i in order]
+})
+
+if force_panels:
+    total_height = sum(max(3.0, 0.6 * len(panel["feature_names"]) + 1.5) for panel in force_panels)
+    fig, axes = plt.subplots(len(force_panels), 1, figsize=(16, total_height), squeeze=False)
+    for ax, panel in zip(axes.flatten(), force_panels):
+        plt.sca(ax)
+        shap.force_plot(
+            expected_value,
+            panel["shap_values"],
+            panel["feature_values"],
+            feature_names=panel["feature_names"],
+            matplotlib=True,
+            show=False
+        )
+        ax.set_title(panel["title"], fontsize=12, pad=12)
+    combined_force_path = os.path.join(res_dir, "force_combined.png")
+    fig.savefig(combined_force_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved combined force plot: {combined_force_path}")
 
 # -------- GLOBAL & LOCAL SHAP VISUALS WITH LABELS ON LEFT --------
 # Global beeswarm (feature names on left)
