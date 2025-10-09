@@ -521,5 +521,5 @@ config_snapshot = {
 with open(os.path.join(results_dir, "run_config.json"), "w") as f:
     json.dump(config_snapshot, f, indent=4)
 
-print(f"\n📁 All results and plots saved in: {os.path.abspath(results_dir)}")
+print(f"\n All results and plots saved in: {os.path.abspath(results_dir)}")
 
