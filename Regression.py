@@ -31,6 +31,7 @@ USE_GPU = False
 GPU_ID = 0
 N_FOLDS = 5
 RANDOM_STATE = 42
+TARGET_CELL_LINE = "TCGA-39-5011-01A"
 
 def minutes(sec): return sec / 60.0
 def safe_name(s: str) -> str:
@@ -48,6 +49,18 @@ print(f"Results directory: {os.path.abspath(res_dir)}")
 
 id_cols = ["CELL_LINE_NAME", "DRUG_NAME"]
 assert all(c in gdsc.columns for c in id_cols + ["LN_IC50"]), "Missing required columns."
+
+class_col_candidates = [
+    "CANCER_TYPE",
+    "CANCER_TYPE_PRIMARY",
+    "CANCER_TYPE_DETAILED",
+    "CANCER_TYPE_CODE",
+]
+class_col = next((c for c in class_col_candidates if c in gdsc.columns), None)
+if class_col:
+    print(f"Class column detected for SHAP cohort plots: {class_col}")
+else:
+    print("No class column detected – cohort plots will be skipped.")
 
 y = gdsc["LN_IC50"].values
 meta = gdsc[id_cols].copy()
@@ -239,9 +252,28 @@ best_reg = regressors[best_name]
 print(f"\n🏆 Best Regressor: {best_name}")
 
 # -------- FINAL TRAIN/TEST SPLIT --------
-X_train, X_test, y_train, y_test, meta_train, meta_test = train_test_split(
-    X, y, meta, test_size=0.2, random_state=RANDOM_STATE
-)
+if class_col:
+    class_labels = gdsc[class_col].astype(str)
+    split = train_test_split(
+        X,
+        y,
+        meta,
+        class_labels,
+        test_size=0.2,
+        random_state=RANDOM_STATE
+    )
+    X_train, X_test, y_train, y_test, meta_train, meta_test, _class_train, class_test = split
+    class_test = pd.Series(class_test).reset_index(drop=True)
+else:
+    X_train, X_test, y_train, y_test, meta_train, meta_test = train_test_split(
+        X, y, meta, test_size=0.2, random_state=RANDOM_STATE
+    )
+    class_test = None
+
+for df_like in (X_train, X_test, meta_train, meta_test):
+    if hasattr(df_like, "reset_index"):
+        df_like.reset_index(drop=True, inplace=True)
+
 best_reg.fit(X_train, y_train)
 
 # -------- TEST METRICS --------
@@ -262,6 +294,63 @@ shap_values = explainer.shap_values(X_test)
 shap_arr = np.asarray(shap_values)    # [N_test, F]
 abs_shap = np.abs(shap_arr)
 expected_value = float(np.ravel(np.array(explainer.expected_value))[0])
+
+if class_col and class_test is not None:
+    unique_classes = sorted(class_test.dropna().unique())
+    print(f"\nGenerating cohort-level SHAP plots for classes: {unique_classes}")
+
+    cohort_df = pd.DataFrame({"feature": feature_names})
+    cohort_df["overall_mean_abs"] = abs_shap.mean(axis=0)
+    for cls in unique_classes:
+        mask = class_test == cls
+        if mask.any():
+            cohort_df[cls] = abs_shap[mask.values, :].mean(axis=0)
+        else:
+            cohort_df[cls] = 0.0
+
+    top_n = min(20, len(feature_names))
+    cohort_top = cohort_df.sort_values("overall_mean_abs", ascending=False).head(top_n)
+
+    plt.figure(figsize=(12, max(6, top_n * 0.4)))
+    y_positions = np.arange(len(cohort_top))[::-1]
+    cumulative = np.zeros(len(cohort_top))
+    colors = plt.cm.tab20(np.linspace(0, 1, max(3, len(unique_classes))))
+
+    for color_idx, cls in enumerate(unique_classes):
+        values = cohort_top[cls].fillna(0).values[::-1]
+        plt.barh(
+            y_positions,
+            values,
+            left=cumulative,
+            color=colors[color_idx % len(colors)],
+            label=str(cls)
+        )
+        cumulative += values
+
+    plt.yticks(y_positions, cohort_top["feature"].values[::-1])
+    plt.xlabel("Mean |SHAP|")
+    plt.title("Cohort-level Mean |SHAP| by Feature and Class")
+    plt.legend(title="Class", bbox_to_anchor=(1.04, 1), loc="upper left", borderaxespad=0.)
+    plt.tight_layout()
+    cohort_plot_path = os.path.join(res_dir, "cohort_mean_abs_shap.png")
+    plt.savefig(cohort_plot_path, dpi=150)
+    plt.close()
+    print(f"Saved cohort stacked bar plot: {cohort_plot_path}")
+
+    for cls in unique_classes:
+        cls_sorted = cohort_df.sort_values(cls, ascending=False).head(top_n)
+        plt.figure(figsize=(10, max(6, top_n * 0.4)))
+        positions = np.arange(len(cls_sorted))[::-1]
+        plt.barh(positions, cls_sorted[cls].values[::-1], color="#1f77b4")
+        plt.yticks(positions, cls_sorted["feature"].values[::-1])
+        plt.xlabel("Mean |SHAP|")
+        plt.title(f"Mean |SHAP| by Feature — Class: {cls}")
+        plt.tight_layout()
+        class_plot_path = os.path.join(res_dir, f"class_mean_abs_shap_{safe_name(cls)}.png")
+        plt.savefig(class_plot_path, dpi=150)
+        plt.close()
+        print(f"Saved class-specific bar plot: {class_plot_path}")
+
 
 # --- map original test indices -> SHAP row positions ---
 pos_of = {orig_idx: pos for pos, orig_idx in enumerate(X_test.index)}
@@ -337,6 +426,40 @@ out_signed = os.path.join(
 plt.savefig(out_signed, dpi=150)
 plt.close()
 print(f"Saved least-error signed SHAP plot: {out_signed}")
+
+
+# -------- (c) Force plots for target cell line --------
+target_mask = meta_test["CELL_LINE_NAME"].astype(str) == TARGET_CELL_LINE
+if target_mask.any():
+    print(f"\nGenerating force plots for target cell line: {TARGET_CELL_LINE}")
+    target_indices = np.where(target_mask.values)[0]
+    for idx in target_indices:
+        class_label = None
+        if class_test is not None and len(class_test) > idx:
+            class_label = class_test.iloc[idx]
+        label_suffix = safe_name(class_label) if class_label is not None else "unknown"
+        plt.figure(figsize=(12, 3.5))
+        shap.force_plot(
+            expected_value,
+            shap_arr[idx, :],
+            X_test.iloc[idx, :],
+            matplotlib=True,
+            show=False
+        )
+        title_bits = [f"SHAP Force Plot — {TARGET_CELL_LINE}"]
+        if class_label is not None:
+            title_bits.append(f"Class: {class_label}")
+        plt.title(" | ".join(title_bits), fontsize=11)
+        plt.tight_layout()
+        force_path = os.path.join(
+            res_dir,
+            f"force_plot_{safe_name(TARGET_CELL_LINE)}_{label_suffix}_{idx}.png"
+        )
+        plt.savefig(force_path, dpi=200, bbox_inches="tight")
+        plt.close()
+        print(f"Saved force plot: {force_path}")
+else:
+    print(f"\nNo samples for target cell line {TARGET_CELL_LINE} were found in the test split.")
 
 
 # -------- GLOBAL SHAP VISUALS WITH LABELS ON LEFT --------
