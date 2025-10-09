@@ -2,10 +2,8 @@
 # CLASSIFICATION PIPELINE (All Models Use SHAP TreeExplainer)
 # ==============================
 import os
-import sys
 import time
 import json
-import shutil
 import warnings
 from datetime import datetime
 
@@ -55,6 +53,17 @@ y_enc = le.fit_transform(y)
 classes = le.classes_.tolist()
 print(f"Classes: {classes}")
 print(f"Data: {X.shape[0]} samples × {X.shape[1]} features\n")
+
+
+# -------- RESULTS DIRECTORY --------
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+results_dir = f"classification_results_{timestamp}"
+plots_dir = os.path.join(results_dir, "plots")
+tables_dir = os.path.join(results_dir, "tables")
+
+os.makedirs(plots_dir, exist_ok=True)
+os.makedirs(tables_dir, exist_ok=True)
+print(f"Results directory: {os.path.abspath(results_dir)}\n")
 
 
 # -------- BUILD MODELS --------
@@ -204,12 +213,10 @@ print("\n=== CV Results (mean metrics & timing) ===")
 print(res_df)
 print(f"\nTotal training time (all models): {minutes(overall_time):.2f} min")
 
-# Ensure plots dir exists
-os.makedirs("plots", exist_ok=True)
-
-# Persist CV summary now (also saved again into results folder later)
-res_df.to_csv("cv_results.csv", index=True)
-print("Saved CV table -> cv_results.csv")
+# Persist CV summary
+cv_summary_path = os.path.join(results_dir, "cv_summary.csv")
+res_df.to_csv(cv_summary_path, index=True)
+print(f"Saved CV table -> {cv_summary_path}")
 
 # -------- METRICS BAR CHART --------
 plot_df = res_df[["accuracy_mean", "f1_macro_mean", "precision_macro_mean", "recall_macro_mean"]]
@@ -229,9 +236,10 @@ plt.ylim(0, 1.0)
 plt.title("Cross-validated Mean Metrics by Model")
 plt.legend()
 plt.tight_layout()
-plt.savefig("plots/metrics_bar.png", dpi=150)
+metrics_bar_path = os.path.join(plots_dir, "metrics_bar.png")
+plt.savefig(metrics_bar_path, dpi=150)
 plt.close()
-print("Saved metrics bar chart -> plots/metrics_bar.png")
+print(f"Saved metrics bar chart -> {metrics_bar_path}")
 
 # -------- PICK BEST MODEL --------
 best_name = res_df.index[0]
@@ -353,10 +361,9 @@ for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
         print(f"  #{rank:<2d} {fname:30s}  {val:.6f}")
 
 # Save per-class top10 table
-os.makedirs("tables", exist_ok=True)
-per_class_csv_temp = "tables/per_class_top10_shap.csv"
-pd.DataFrame(top10_rows).to_csv(per_class_csv_temp, index=False)
-print(f"\nSaved per-class Top-10 SHAP table -> {per_class_csv_temp}")
+per_class_csv_path = os.path.join(tables_dir, "per_class_top10_shap.csv")
+pd.DataFrame(top10_rows).to_csv(per_class_csv_path, index=False)
+print(f"\nSaved per-class Top-10 SHAP table -> {per_class_csv_path}")
 
 # -------- COHORT-WIDE FEATURE IMPORTANCE BARPLOT --------
 if class_feature_means:
@@ -373,7 +380,7 @@ if class_feature_means:
     cohort_top_df = class_mean_df.loc[cohort_top_features]
     cohort_top_df = cohort_top_df.sort_values("cohort_mean_abs_shap", ascending=True)
 
-    cohort_table_path = "tables/cohort_feature_importance.csv"
+    cohort_table_path = os.path.join(tables_dir, "cohort_feature_importance.csv")
     cohort_top_df.to_csv(cohort_table_path, index_label="feature")
     print(f"Saved cohort-level feature importance table -> {cohort_table_path}")
 
@@ -399,13 +406,13 @@ if class_feature_means:
     plt.title("Top 10 Features – Cohort-wide Class Contributions")
     plt.legend(loc="lower right", frameon=True)
     plt.tight_layout()
-    cohort_plot_path = "plots/cohort_feature_importance.png"
+    cohort_plot_path = os.path.join(plots_dir, "cohort_feature_importance.png")
     plt.savefig(cohort_plot_path, dpi=150)
     plt.close()
     print(f"Saved cohort feature importance bar plot -> {cohort_plot_path}")
 
     # --- Per-class breakdown plots ---
-    per_class_plot_dir = os.path.join("plots", "per_class_feature_importance")
+    per_class_plot_dir = os.path.join(plots_dir, "per_class_feature_importance")
     os.makedirs(per_class_plot_dir, exist_ok=True)
 
     for cidx, cname in enumerate(class_order):
@@ -468,51 +475,32 @@ for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
     )
     plt.title(f"{sample_ids[row_idx]} — {cname}\nBase={base_val:.4f}, f(x)={fx_val:.4f}")
     plt.tight_layout()
-    out_path = f"plots/force_{sample_ids[row_idx]}_{cname}.png"
+    out_path = os.path.join(plots_dir, f"force_{sample_ids[row_idx]}_{cname}.png")
     plt.savefig(out_path, dpi=150)
     plt.close()
 
-print("\nSaved SHAP force plots for all classes to ./plots/")
+print(f"\nSaved SHAP force plots for all classes to {plots_dir}")
 
 # ==============================
 # SAVE TRAINING RESULTS (Metrics + Plots) INTO TIMESTAMPED FOLDER
 # ==============================
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-results_dir = f"classification_results_{timestamp}"
-os.makedirs(results_dir, exist_ok=True)
 
-# 1) Save CV summary
-cv_summary_path = os.path.join(results_dir, "cv_summary.csv")
-res_df.to_csv(cv_summary_path, index=True)
-print(f"Saved CV summary -> {cv_summary_path}")
-
-# 2) Save raw fold metrics
+# Raw fold metrics
 folds_df = pd.DataFrame(folds_raw)
 folds_csv_path = os.path.join(results_dir, "fold_scores_raw.csv")
 folds_df.to_csv(folds_csv_path, index=False)
 print(f"Saved per-fold raw metrics -> {folds_csv_path}")
 
-# 3) Save SHAP tables
-per_class_csv_path = os.path.join(results_dir, "per_class_top10_shap.csv")
-shutil.copy2(per_class_csv_temp, per_class_csv_path)
-print(f"Saved per-class Top-10 SHAP -> {per_class_csv_path}")
-
-cohort_table_temp = "tables/cohort_feature_importance.csv"
-if os.path.exists(cohort_table_temp):
-    cohort_csv_path = os.path.join(results_dir, "cohort_feature_importance.csv")
-    shutil.copy2(cohort_table_temp, cohort_csv_path)
-    print(f"Saved cohort feature importance table -> {cohort_csv_path}")
-
-# 4) Copy plots
+# Plot inventory
 plot_paths = []
-for plot_file in os.listdir("plots"):
-    src_path = os.path.join("plots", plot_file)
-    if os.path.isfile(src_path):
-        dst_path = os.path.join(results_dir, plot_file)
-        shutil.copy2(src_path, dst_path)
+for root_dir, _, files in os.walk(plots_dir):
+    for file_name in files:
+        if not file_name.lower().endswith(".png"):
+            continue
+        full_path = os.path.join(root_dir, file_name)
         plot_paths.append({
-            "plot_name": plot_file,
-            "file_path": os.path.abspath(dst_path)
+            "plot_name": os.path.relpath(full_path, results_dir),
+            "file_path": os.path.abspath(full_path)
         })
 
 plots_csv_path = os.path.join(results_dir, "generated_plots.csv")
