@@ -249,8 +249,9 @@ print(f"Final training took {minutes(time.perf_counter()-t0):.2f} min")
 print("\nComputing SHAP values with TreeExplainer (probability, interventional)...")
 shap_start = time.perf_counter()
 
-# Provide background dataset for interventional mode
-background = shap.utils.sample(X, 200, random_state=42)
+# Provide background dataset for interventional mode (cap to dataset size)
+bg_size = min(len(X), 200)
+background = shap.utils.sample(X, bg_size, random_state=42)
 
 explainer = shap.TreeExplainer(
     model=best_clf,
@@ -313,11 +314,16 @@ for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
     top_idx = np.argsort(mean_abs)[::-1][:10]
 
     print(f"\n{cname}:")
-    for i in top_idx:
-        fname = str(feature_names[i])
-        val = float(mean_abs[i])
-        top10_rows.append({"Class": cname, "feature": fname, "mean_abs_shap": val})
-        print(f"  {fname:30s}  {val:.6f}")
+    for rank, feature_index in enumerate(top_idx, start=1):
+        fname = str(feature_names[feature_index])
+        val = float(mean_abs[feature_index])
+        top10_rows.append({
+            "Class": cname,
+            "rank": rank,
+            "feature": fname,
+            "mean_abs_shap": val
+        })
+        print(f"  #{rank:<2d} {fname:30s}  {val:.6f}")
 
 # Save per-class top10 table
 os.makedirs("tables", exist_ok=True)
