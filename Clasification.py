@@ -313,10 +313,6 @@ for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
         fname = str(feature_names[i])
         val = float(mean_abs[i])
         print(f"  {fname:30s}  {val:.6f}")
-        val = mean_abs[i]
-        if isinstance(val, np.ndarray):
-            val = float(val.mean())  # safely flatten to a scalar
-        print(f"  {str(X.columns[i]):30s}  {val:.6f}")
 
 # -------- FORCE PLOTS --------
 if TARGET_ID in sample_ids:
