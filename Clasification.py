@@ -27,7 +27,6 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.base import clone
 
-
 # -------- CONFIG --------
 USE_GPU = True          # GPU acceleration for training (XGB/LGBM/CatBoost)
 GPU_ID = 0
@@ -35,7 +34,6 @@ TARGET_ID = "TCGA-39-5011-01A"  # Patient ID for SHAP visualization
 
 def minutes(sec):
     return sec / 60.0
-
 
 # -------- LOAD DATA --------
 df = pd.read_csv("lncRNA_5_Cancers.csv")
@@ -64,7 +62,6 @@ tables_dir = os.path.join(results_dir, "tables")
 os.makedirs(plots_dir, exist_ok=True)
 os.makedirs(tables_dir, exist_ok=True)
 print(f"Results directory: {os.path.abspath(results_dir)}\n")
-
 
 # -------- BUILD MODELS --------
 def build_models(use_gpu=True, gpu_id=0):
@@ -130,7 +127,6 @@ def xgb_predict_labels(model, X_te, n_classes):
     except Exception:
         # Fallback to standard CPU predict if anything goes wrong
         return model.predict(X_te)
-
 
 # -------- 5-FOLD CROSS-VALIDATION --------
 cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
@@ -251,7 +247,6 @@ print(f"\nFitting {best_name} on full dataset...")
 t0 = time.perf_counter()
 best_clf.fit(X, y_enc)
 print(f"Final training took {minutes(time.perf_counter()-t0):.2f} min")
-
 
 # -------- SHAP FOR BEST MODEL --------
 print("\nComputing SHAP values with TreeExplainer (probability, interventional)...")
@@ -464,7 +459,6 @@ for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
         f"  {cname}: base value (mean class probability) = {base_val:.6f}, "
         f"f(x) = {fx_val:.6f}"
     )
-
     shap.force_plot(
         base_val,
         sv_by_class[cidx][row_idx, :],

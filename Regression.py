@@ -110,23 +110,23 @@ def build_models(use_gpu=True, gpu_id=0):
         cat_params["devices"] = str(gpu_id)
 
     models = {
-        "DecisionTree": DecisionTreeRegressor(random_state=RANDOM_STATE),
-        "RandomForest": RandomForestRegressor(
-            n_estimators=200,
-            max_depth=15,
-            n_jobs=-1,
-            random_state=RANDOM_STATE
-        ),
-        "GradientBoosting": GradientBoostingRegressor(
-            n_estimators=200,
-            learning_rate=0.05,
-            max_depth=6,
-            subsample=0.9,
-            max_features=0.3,
-            random_state=RANDOM_STATE
-        ),
-        "XGBoost": XGBRegressor(**xgb_params),
-        "LightGBM": LGBMRegressor(**lgbm_params),
+        # "DecisionTree": DecisionTreeRegressor(random_state=RANDOM_STATE),
+        # "RandomForest": RandomForestRegressor(
+        #     n_estimators=200,
+        #     max_depth=15,
+        #     n_jobs=-1,
+        #     random_state=RANDOM_STATE
+        # ),
+        # "GradientBoosting": GradientBoostingRegressor(
+        #     n_estimators=200,
+        #     learning_rate=0.05,
+        #     max_depth=6,
+        #     subsample=0.9,
+        #     max_features=0.3,
+        #     random_state=RANDOM_STATE
+        # ),
+        # "XGBoost": XGBRegressor(**xgb_params),
+        # "LightGBM": LGBMRegressor(**lgbm_params),
         "CatBoost": CatBoostRegressor(**cat_params),
     }
     return models
