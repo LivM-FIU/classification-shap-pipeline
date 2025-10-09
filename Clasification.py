@@ -35,7 +35,7 @@ USE_GPU = True          # GPU acceleration for training (XGB/LGBM/CatBoost)
 GPU_ID = 0
 TARGET_ID = "TCGA-39-5011-01A"  # Patient ID for SHAP visualization
 
-def minutes(sec): 
+def minutes(sec):
     return sec / 60.0
 
 
@@ -250,7 +250,7 @@ print(f"Final training took {minutes(time.perf_counter()-t0):.2f} min")
 print("\nComputing SHAP values with TreeExplainer (probability, interventional)...")
 shap_start = time.perf_counter()
 
-# Provide a background dataset for interventional (fixes previous error)
+# Provide a background dataset for interventional
 background = shap.utils.sample(X, 200, random_state=42)
 
 explainer = shap.TreeExplainer(
@@ -260,33 +260,59 @@ explainer = shap.TreeExplainer(
     feature_perturbation="interventional"
 )
 
-# You can also subsample X for faster SHAP if needed; here we use full X:
+# Compute SHAP on full X (or subsample for speed)
 shap_values = explainer.shap_values(X)
 base_values = explainer.expected_value
 
 print(f"SHAP computation took {minutes(time.perf_counter()-shap_start):.2f} min")
 
-# Normalize to consistent shape
+# ---------- Normalize SHAP outputs (works for binary & multiclass) ----------
+feature_names = X.columns.to_list()  # ensure plain list (not pandas Index)
+
+# sv_by_class -> [C, N, F]
 if isinstance(shap_values, list):
-    sv_by_class = np.stack(shap_values, axis=0)  # [C, N, F]
-    base_per_class = np.array(base_values)
+    # multiclass typical: list length = n_classes
+    sv_by_class = np.stack([np.asarray(s) for s in shap_values], axis=0)
 else:
-    sv_by_class = np.expand_dims(np.asarray(shap_values), 0)
-    base_per_class = np.array([base_values]) if np.isscalar(base_values) else np.mean(base_values)
+    sv = np.asarray(shap_values)
+    if sv.ndim == 3:
+        # already [C, N, F]
+        sv_by_class = sv
+    elif sv.ndim == 2:
+        # binary: [N, F] -> add class axis
+        sv_by_class = sv[None, ...]
+    else:
+        raise ValueError(f"Unexpected shap_values shape: {sv.shape}")
+
+# base_per_class -> shape [C]
+ev = base_values
+if isinstance(ev, (list, tuple, np.ndarray)):
+    base_per_class = np.array(ev).reshape(-1)
+else:
+    base_per_class = np.array([float(ev)])
+
+# If we got a scalar base value but multiple classes, repeat it
+n_classes_out = sv_by_class.shape[0]
+if base_per_class.size == 1 and n_classes_out > 1:
+    base_per_class = np.repeat(base_per_class[0], n_classes_out)
 
 
 # -------- TOP 10 FEATURES PER CLASS --------
 print("\n=== Per-Class Top 10 Features by mean |SHAP| ===")
 for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
     mask = (y_enc == cidx)
-    mean_abs = np.abs(sv_by_class[cidx][mask]).mean(axis=0)
+    if not np.any(mask):
+        print(f"\n{cname}: [no samples in this class subset]")
+        continue
+
+    mean_abs = np.abs(sv_by_class[cidx][mask]).mean(axis=0)  # [F]
     top_idx = np.argsort(mean_abs)[::-1][:10]
+
     print(f"\n{cname}:")
     for i in top_idx:
-        val = mean_abs[i]
-        if isinstance(val, np.ndarray):
-            val = float(val.mean())  # safely flatten to a scalar
-        print(f"  {str(X.columns[i]):30s}  {val:.6f}")
+        fname = str(feature_names[i])
+        val = float(mean_abs[i])
+        print(f"  {fname:30s}  {val:.6f}")
 
 # -------- FORCE PLOTS --------
 if TARGET_ID in sample_ids:
@@ -297,11 +323,13 @@ else:
 
 print(f"\nGenerating force plots for {sample_ids[row_idx]} ...")
 for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
+    # safe per-class base value
+    base_val = float(base_per_class[cidx]) if base_per_class.ndim > 0 else float(base_per_class)
     shap.force_plot(
-        base_per_class[cidx],
+        base_val,
         sv_by_class[cidx][row_idx, :],
         X.iloc[row_idx, :],
-        feature_names=X.columns,
+        feature_names=feature_names,
         matplotlib=True,
         show=False
     )

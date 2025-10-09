@@ -4,6 +4,7 @@
 # GPU Acceleration + SHAP + Fold Metrics + Timing
 # ==================================================
 import os
+import re
 import json
 import time
 import warnings
@@ -34,31 +35,33 @@ RANDOM_STATE = 42
 
 def minutes(sec): return sec / 60.0
 
+def safe_name(s: str) -> str:
+    return re.sub(r'[^A-Za-z0-9_.-]+', '_', str(s)).strip('_')
+
 # -------- LOAD DATA --------
 start_total = time.perf_counter()
 gdsc = pd.read_csv(DATA_PATH)
-print(f"✅ Data loaded: {gdsc.shape[0]} samples × {gdsc.shape[1]} columns")
+print(f"Data loaded: {gdsc.shape[0]} samples × {gdsc.shape[1]} columns")
 
 id_cols = ["CELL_LINE_NAME", "DRUG_NAME"]
-assert all(c in gdsc.columns for c in id_cols + ["LN_IC50"]), "Missing required columns."
 
 y = gdsc["LN_IC50"].values
 meta = gdsc[id_cols].copy()
 X = gdsc.drop(columns=id_cols + ["LN_IC50"]).apply(pd.to_numeric, errors="coerce")
 X = X.fillna(X.median(numeric_only=True)).astype(np.float32)
 feature_names = X.columns.tolist()
-print(f"✅ Feature matrix: {X.shape[0]} × {X.shape[1]}")
+print(f"Feature matrix: {X.shape[0]} × {X.shape[1]}")
 
 # -------- DEFINE MODELS --------
 def build_models(use_gpu=True, gpu_id=0):
     models = {
         "DecisionTree": DecisionTreeRegressor(random_state=RANDOM_STATE),
         "RandomForest": RandomForestRegressor(
-            n_estimators=100,  # halve tree count
-            max_depth=15,      # shallower trees
+            n_estimators=200,
+            max_depth=15,
             n_jobs=-1,
-            random_state=42
-            ),
+            random_state=RANDOM_STATE
+        ),
         "GBM": GradientBoostingRegressor(
             n_estimators=200, learning_rate=0.05, max_depth=6,
             subsample=0.9, max_features=0.3, random_state=RANDOM_STATE
@@ -85,7 +88,7 @@ def build_models(use_gpu=True, gpu_id=0):
 try:
     regressors = build_models(USE_GPU, GPU_ID)
 except Exception as e:
-    print(f"[⚠️ GPU init warning] Fallback to CPU: {e}")
+    print(f"[GPU init warning] Fallback to CPU: {e}")
     regressors = build_models(False, GPU_ID)
 
 # -------- CROSS-VALIDATION WITH FOLD METRICS --------
@@ -94,7 +97,7 @@ results = {}
 
 for name, model in regressors.items():
     print("\n" + "=" * 90)
-    print(f"🚀 Training model: {name}")
+    print(f"Training model: {name}")
     print("-" * 90)
     model_start = time.perf_counter()
 
@@ -130,23 +133,26 @@ for name, model in regressors.items():
     }
 
     print("-" * 90)
-    print(f"✅ Mean across {N_FOLDS} folds: "
+    print(f"Mean across {N_FOLDS} folds: "
           f"MAE={np.mean(fold_mae):.4f}±{np.std(fold_mae):.4f}, "
           f"MSE={np.mean(fold_mse):.4f}, RMSE={np.mean(fold_rmse):.4f}, "
           f"R²={np.mean(fold_r2):.4f}")
-    print(f"⏱ Total training time for {name}: {minutes(total_model_time):.2f} min")
+    print(f"Total training time for {name}: {minutes(total_model_time):.2f} min")
     print("=" * 90)
 
 # -------- CV SUMMARY --------
-cv_df = pd.DataFrame(results).T.sort_values(by=["RMSE_mean", "MAE_mean", "R2_mean"], ascending=[True, True, False])
-print("\n=== 📊 Cross-Validation Summary ===")
+cv_df = pd.DataFrame(results).T.sort_values(
+    by=["RMSE_mean", "MAE_mean", "R2_mean"],
+    ascending=[True, True, False]
+)
+print("\n=== Cross-Validation Summary ===")
 print(cv_df.round(4))
-print(f"\n⏱ Total experiment time: {minutes(time.perf_counter()-start_total):.2f} min")
+print(f"\nTotal experiment time: {minutes(time.perf_counter()-start_total):.2f} min")
 
 # -------- BEST MODEL SELECTION --------
 best_name = cv_df.index[0]
 best_reg = regressors[best_name]
-print(f"\n🏆 Best Regressor: {best_name}")
+print(f"\nBest Regressor: {best_name}")
 
 # -------- FINAL TRAIN/TEST SPLIT --------
 X_train, X_test, y_train, y_test, meta_train, meta_test = train_test_split(
@@ -161,42 +167,63 @@ mse = mean_squared_error(y_test, y_pred)
 rmse = np.sqrt(mse)
 r2 = r2_score(y_test, y_pred)
 
-print("\n=== 🧪 Final Test Metrics ===")
+print("\n=== Final Test Metrics ===")
 print(f"MAE={mae:.4f}, MSE={mse:.4f}, RMSE={rmse:.4f}, R²={r2:.4f}")
 
 # -------- SHAP ANALYSIS --------
-print("\n💡 Computing SHAP values for best model...")
+print("\nComputing SHAP values for best model...")
 background = shap.utils.sample(X_train, 200, random_state=42)
-explainer = shap.TreeExplainer(best_reg, data=background)
+explainer = shap.TreeExplainer(best_reg, data=background, feature_perturbation="interventional")
 shap_values = explainer.shap_values(X_test)
-shap_arr = np.asarray(shap_values)
+shap_arr = np.asarray(shap_values)    # [N_test, F]
 abs_shap = np.abs(shap_arr)
 
-# -------- (a) Per-drug Top 10 --------
+# --- map original test indices -> SHAP row positions ---
+pos_of = {orig_idx: pos for pos, orig_idx in enumerate(X_test.index)}
+
+# -------- (a) Per-drug Top 10 (safe indexing) --------
 drug_top10 = {}
-print("\n=== 🔍 Per-Drug Top-10 Features by mean |SHAP| ===")
-for drug, idxs in meta_test.groupby("DRUG_NAME").groups.items():
-    idxs = list(idxs)
-    if len(idxs) == 0:
+print("\n=== Per-Drug Top-10 Features by mean |SHAP| ===")
+for drug, orig_idxs in meta_test.groupby("DRUG_NAME").groups.items():
+    pos_idxs = [pos_of[i] for i in orig_idxs if i in pos_of]
+    if not pos_idxs:
         continue
-    mean_abs = abs_shap[idxs, :].mean(axis=0)
+    mean_abs = abs_shap[pos_idxs, :].mean(axis=0)   # [F]
     top_idx = np.argsort(mean_abs)[::-1][:10]
     drug_top10[drug] = [(feature_names[i], float(mean_abs[i])) for i in top_idx]
+
     print(f"\n{drug}:")
     for f, val in drug_top10[drug]:
         print(f"  {f:30s}  {val:.6f}")
 
-# -------- (b) Least-error sample --------
+# ---- (a) PLOTS: Per-drug Top-10 mean |SHAP| ----
+for drug, feats in drug_top10.items():
+    if not feats:
+        continue
+    names, vals = zip(*feats)  # 10 names, 10 values
+    plt.figure(figsize=(8, 5))
+    y_pos = np.arange(len(names))[::-1]
+    plt.barh(y_pos, vals[::-1])
+    plt.yticks(y_pos, [names[i] for i in range(len(names)-1, -1, -1)])
+    plt.xlabel("Mean |SHAP|")
+    plt.title(f"Top 10 Features by mean |SHAP| — {drug}")
+    plt.tight_layout()
+    out_path = f"plots/per_drug_top10_{safe_name(drug)}.png"
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"Saved per-drug top-10 plot: {out_path}")
+
+# -------- (b) Least-error sample (use .iloc for positional) --------
 errors = np.abs(y_pred - y_test)
-min_idx = int(np.argmin(errors))
+min_pos = int(np.argmin(errors))   # positional inside X_test
 pair = (
-    meta_test.loc[min_idx, "DRUG_NAME"],
-    meta_test.loc[min_idx, "CELL_LINE_NAME"]
+    meta_test.iloc[min_pos]["CELL_LINE_NAME"],
+    meta_test.iloc[min_pos]["DRUG_NAME"]
 )
 print(f"\nLeast prediction error sample → drug={pair[0]}, cell_line={pair[1]}")
-print(f"True LN_IC50={y_test[min_idx]:.4f}, Pred={y_pred[min_idx]:.4f}, AbsError={errors[min_idx]:.6f}")
+print(f"True LN_IC50={y_test[min_pos]:.4f}, Pred={y_pred[min_pos]:.4f}, AbsError={errors[min_pos]:.6f}")
 
-row_shap = shap_arr[min_idx, :]
+row_shap = shap_arr[min_pos, :]
 order = np.argsort(np.abs(row_shap))[::-1][:10]
 pair_top10 = [(feature_names[i], float(row_shap[i])) for i in order]
 
@@ -204,32 +231,94 @@ print("\nTop-10 features for least-error pair (signed SHAP):")
 for f, val in pair_top10:
     print(f"  {f:30s}  SHAP={val:.6f}")
 
-# -------- FORCE PLOT --------
+# ---- (b) PLOT: Least-error signed SHAP ----
+top_feats  = [feature_names[i] for i in order]
+top_shaps  = [float(row_shap[i]) for i in order]
+plt.figure(figsize=(8, 5))
+y_pos = np.arange(len(top_feats))[::-1]
+plt.barh(y_pos, top_shaps[::-1]) 
+plt.yticks(y_pos, [top_feats[i] for i in range(len(top_feats)-1, -1, -1)])
+plt.xlabel("SHAP value (signed)")
+plt.title(f"Top 10 SHAP — Least-error: {pair[0]} | {pair[1]}")
+plt.tight_layout()
+out_signed = f"plots/least_error_top10_{safe_name(pair[0])}_{safe_name(pair[1])}.png"
+plt.savefig(out_signed, dpi=150)
+plt.close()
+print(f"Saved least-error signed SHAP plot: {out_signed}")
+
+# -------- FORCE PLOT (use .iloc) --------
 plt.figure()
 shap.force_plot(
     explainer.expected_value,
     row_shap,
-    X_test.loc[min_idx, :],
+    X_test.iloc[min_pos, :],
     feature_names=feature_names,
     matplotlib=True,
     show=False
 )
 plt.title(f"Force Plot — {pair[0]} | {pair[1]}")
 plt.tight_layout()
-plt.savefig(f"plots/force_{pair[0]}_{pair[1]}.png", dpi=150)
+plt.savefig(f"plots/force_{safe_name(pair[0])}_{safe_name(pair[1])}.png", dpi=150)
 plt.close()
-print("💾 Saved SHAP force plot for least-error pair.")
+print("Saved SHAP force plot for least-error pair.")
 
 # -------- SAVE RESULTS --------
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 res_dir = f"results_regression_{timestamp}"
 os.makedirs(res_dir, exist_ok=True)
 
+# Summary CSVs
 cv_df.to_csv(os.path.join(res_dir, "cv_summary.csv"))
 pd.DataFrame({
     "Metric": ["MAE", "MSE", "RMSE", "R2"],
     "Value": [mae, mse, rmse, r2]
 }).to_csv(os.path.join(res_dir, "test_metrics.csv"), index=False)
 
-print(f"\n📁 All results saved in: {os.path.abspath(res_dir)}")
-print(f"⏱ Total runtime: {minutes(time.perf_counter()-start_total):.2f} min")
+# Save per-drug top-10 SHAP to CSV
+rows = []
+for drug, feats in drug_top10.items():
+    for fname, val in feats:
+        rows.append({"DRUG_NAME": drug, "feature": fname, "mean_abs_shap": val})
+pd.DataFrame(rows).to_csv(os.path.join(res_dir, "per_drug_top10_shap.csv"), index=False)
+
+# Copy plots & write registry
+import glob, shutil
+plot_paths = []
+for path in glob.glob(os.path.join("plots", "*.png")):
+    dst = os.path.join(res_dir, os.path.basename(path))
+    try:
+        shutil.copy2(path, dst)
+        plot_paths.append({"plot_name": os.path.basename(path), "file_path": os.path.abspath(dst)})
+    except Exception:
+        pass
+pd.DataFrame(plot_paths).to_csv(os.path.join(res_dir, "generated_plots.csv"), index=False)
+
+# -------- METRIC BAR CHART (CV Summary) --------
+metrics_plot = ["MAE_mean", "MSE_mean", "RMSE_mean", "R2_mean"]
+plt.figure(figsize=(10, 6))
+x = np.arange(len(cv_df))  # each model
+w = 0.2
+
+for i, metric in enumerate(metrics_plot):
+    offset = (i - 1.5) * w
+    plt.bar(x + offset, cv_df[metric].values, width=w, label=metric)
+
+plt.xticks(x, cv_df.index, rotation=15, ha="right")
+plt.ylabel("Metric Value")
+plt.title("Cross-Validated Mean Metrics by Regressor")
+
+# Automatically expand Y-axis slightly (10% higher than max bar)
+#y_max = max(cv_df[metrics_plot].max()) * 2
+plt.ylim(0, 2)
+
+# Move legend below the plot (centered, no overlap)
+plt.legend(loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=4, frameon=False)
+
+plt.tight_layout()
+plt.savefig("plots/metrics_bar_regression.png", dpi=150, bbox_inches="tight")
+plt.close()
+print("Saved regression metrics bar chart → plots/metrics_bar_regression.png")
+
+
+print(f"\nAll results saved in: {os.path.abspath(res_dir)}")
+print(f"Total runtime: {minutes(time.perf_counter()-start_total):.2f} min")
