@@ -83,7 +83,7 @@ def build_models(use_gpu=True, gpu_id=0):
         #     device="cuda" if use_gpu else "cpu"
         # ),
         "LightGBM": LGBMClassifier(
-            n_estimators=200, learning_rate=0.05, num_leaves=64,
+            n_estimators=100, learning_rate=0.05, num_leaves=64,
             subsample=0.9, colsample_bytree=0.9, random_state=42,
             device_type="gpu" if use_gpu else "cpu", verbosity=-1
         )
