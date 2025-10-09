@@ -32,9 +32,6 @@ GPU_ID = 0
 N_FOLDS = 5
 RANDOM_STATE = 42
 
-# For SHAP decision plot speed/readability
-MAX_POINTS_FOR_DECISION = 600
-
 def minutes(sec): return sec / 60.0
 def safe_name(s: str) -> str:
     return re.sub(r'[^A-Za-z0-9_.-]+', '_', str(s)).strip('_')
@@ -374,7 +371,7 @@ if force_panels:
     plt.close(fig)
     print(f"Saved combined force plot: {combined_force_path}")
 
-# -------- GLOBAL & LOCAL SHAP VISUALS WITH LABELS ON LEFT --------
+# -------- GLOBAL SHAP VISUALS WITH LABELS ON LEFT --------
 # Global beeswarm (feature names on left)
 plt.figure(figsize=(12, 8))
 shap.summary_plot(shap_arr, X_test, feature_names=feature_names, show=False)
@@ -382,77 +379,6 @@ plt.tight_layout()
 plt.savefig(os.path.join(res_dir, "summary_beeswarm.png"), dpi=150, bbox_inches="tight")
 plt.close()
 print(f"Saved global SHAP summary beeswarm → {os.path.join(res_dir, 'summary_beeswarm.png')}")
-
-# Global decision plot (subsample for speed + ignore_warnings)
-n = shap_arr.shape[0]
-if n > MAX_POINTS_FOR_DECISION:
-    rng = np.random.default_rng(42)
-    keep = np.sort(rng.choice(n, size=MAX_POINTS_FOR_DECISION, replace=False))
-    shap_arr_plot = shap_arr[keep, :]
-else:
-    shap_arr_plot = shap_arr
-
-plt.figure(figsize=(14, 8))
-shap.decision_plot(
-    base_value=explainer.expected_value,   # scalar for regression
-    shap_values=shap_arr_plot,
-    feature_names=feature_names,
-    ignore_warnings=True,                  # don't abort for large N
-    show=False
-)
-plt.title(f"Global SHAP Decision Plot (n={shap_arr_plot.shape[0]})")
-plt.tight_layout()
-plt.savefig(os.path.join(res_dir, "decision_global.png"), dpi=150, bbox_inches="tight")
-plt.close()
-print(f"Saved global SHAP decision plot → {os.path.join(res_dir, 'decision_global.png')}")
-
-# Local waterfall (names on left, clean stacking)
-try:
-    # Newer SHAP: shap.plots.waterfall with Explanation is preferred, but legacy works widely:
-    from shap.plots._waterfall import waterfall_legacy
-    plt.figure(figsize=(12, 8))
-    waterfall_legacy(
-        expected_value,
-        row_shap,
-        feature_names=feature_names,
-        max_display=20,
-        show=False
-    )
-    plt.title(f"Waterfall — Least-error: {pair[0]} | {pair[1]}")
-    plt.tight_layout()
-    plt.savefig(
-        os.path.join(
-            res_dir,
-            f"waterfall_{safe_name(pair[0])}_{safe_name(pair[1])}.png"
-        ),
-        dpi=150,
-        bbox_inches="tight"
-    )
-    plt.close()
-    print("Saved local SHAP waterfall → results folder")
-except Exception:
-    # Fallback to force plot (single-sample) if waterfall not available
-    plt.figure(figsize=(12, 4))
-    shap.force_plot(
-        expected_value,
-        row_shap,
-        X_test.iloc[min_pos, :],
-        feature_names=feature_names,
-        matplotlib=True,
-        show=False
-    )
-    plt.title(f"Force Plot — Least-error: {safe_name(pair[0])} | {safe_name(pair[1])}")
-    plt.tight_layout()
-    plt.savefig(
-        os.path.join(
-            res_dir,
-            f"force_{safe_name(pair[0])}_{safe_name(pair[1])}.png"
-        ),
-        dpi=150,
-        bbox_inches="tight"
-    )
-    plt.close()
-    print("Saved local SHAP force plot (fallback) in results folder.")
 
 # -------- SAVE RESULTS --------
 
