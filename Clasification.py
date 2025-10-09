@@ -210,7 +210,6 @@ os.makedirs("plots", exist_ok=True)
 res_df.to_csv("cv_results.csv", index=True)
 print("Saved CV table -> cv_results.csv")
 
-
 # -------- METRICS BAR CHART --------
 plot_df = res_df[["accuracy_mean", "f1_macro_mean", "precision_macro_mean", "recall_macro_mean"]]
 
@@ -233,7 +232,6 @@ plt.savefig("plots/metrics_bar.png", dpi=150)
 plt.close()
 print("Saved metrics bar chart -> plots/metrics_bar.png")
 
-
 # -------- PICK BEST MODEL --------
 best_name = res_df.index[0]
 best_clf = models[best_name]
@@ -250,69 +248,81 @@ print(f"Final training took {minutes(time.perf_counter()-t0):.2f} min")
 print("\nComputing SHAP values with TreeExplainer (probability, interventional)...")
 shap_start = time.perf_counter()
 
-# Provide a background dataset for interventional
+# Provide background dataset for interventional mode
 background = shap.utils.sample(X, 200, random_state=42)
 
 explainer = shap.TreeExplainer(
     model=best_clf,
-    data=background,                            # REQUIRED for interventional
+    data=background,
     model_output="probability",
     feature_perturbation="interventional"
 )
 
-# Compute SHAP on full X (or subsample for speed)
+# Compute SHAP values for the full dataset
 shap_values = explainer.shap_values(X)
 base_values = explainer.expected_value
 
 print(f"SHAP computation took {minutes(time.perf_counter()-shap_start):.2f} min")
 
-# ---------- Normalize SHAP outputs (works for binary & multiclass) ----------
-feature_names = X.columns.to_list()  # ensure plain list (not pandas Index)
+# ---------- Normalize SHAP outputs ----------
+feature_names = X.columns.to_list()
 
 # sv_by_class -> [C, N, F]
 if isinstance(shap_values, list):
-    # multiclass typical: list length = n_classes
     sv_by_class = np.stack([np.asarray(s) for s in shap_values], axis=0)
 else:
     sv = np.asarray(shap_values)
     if sv.ndim == 3:
-        # already [C, N, F]
         sv_by_class = sv
     elif sv.ndim == 2:
-        # binary: [N, F] -> add class axis
         sv_by_class = sv[None, ...]
     else:
         raise ValueError(f"Unexpected shap_values shape: {sv.shape}")
 
 # base_per_class -> shape [C]
-ev = base_values
-if isinstance(ev, (list, tuple, np.ndarray)):
-    base_per_class = np.array(ev).reshape(-1)
+if isinstance(base_values, (list, tuple, np.ndarray)):
+    base_per_class = np.array(base_values).reshape(-1)
 else:
-    base_per_class = np.array([float(ev)])
+    base_per_class = np.array([float(base_values)])
 
-# If we got a scalar base value but multiple classes, repeat it
 n_classes_out = sv_by_class.shape[0]
 if base_per_class.size == 1 and n_classes_out > 1:
     base_per_class = np.repeat(base_per_class[0], n_classes_out)
 
-
 # -------- TOP 10 FEATURES PER CLASS --------
 print("\n=== Per-Class Top 10 Features by mean |SHAP| ===")
+
+# Ensure consistent shapes (N must match)
+N = sv_by_class.shape[1]
+if len(y_enc) != N:
+    print(f"[Warning] Adjusting y_enc size ({len(y_enc)}) -> ({N}) to match SHAP output")
+    y_enc = np.array(y_enc[:N])
+
+top10_rows = []
 for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
     mask = (y_enc == cidx)
     if not np.any(mask):
         print(f"\n{cname}: [no samples in this class subset]")
         continue
 
-    mean_abs = np.abs(sv_by_class[cidx][mask]).mean(axis=0)  # [F]
+    # Ensure mask and sv_by_class[cidx] align in length
+    mask = mask[:sv_by_class[cidx].shape[0]]
+
+    mean_abs = np.abs(sv_by_class[cidx][mask]).mean(axis=0)
     top_idx = np.argsort(mean_abs)[::-1][:10]
 
     print(f"\n{cname}:")
     for i in top_idx:
         fname = str(feature_names[i])
         val = float(mean_abs[i])
+        top10_rows.append({"Class": cname, "feature": fname, "mean_abs_shap": val})
         print(f"  {fname:30s}  {val:.6f}")
+
+# Save per-class top10 table
+os.makedirs("tables", exist_ok=True)
+per_class_csv_temp = "tables/per_class_top10_shap.csv"
+pd.DataFrame(top10_rows).to_csv(per_class_csv_temp, index=False)
+print(f"\nSaved per-class Top-10 SHAP table -> {per_class_csv_temp}")
 
 # -------- FORCE PLOTS --------
 if TARGET_ID in sample_ids:
@@ -323,7 +333,6 @@ else:
 
 print(f"\nGenerating force plots for {sample_ids[row_idx]} ...")
 for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
-    # safe per-class base value
     base_val = float(base_per_class[cidx]) if base_per_class.ndim > 0 else float(base_per_class)
     shap.force_plot(
         base_val,
@@ -341,26 +350,30 @@ for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
 
 print("\nSaved SHAP force plots for all classes to ./plots/")
 
-
 # ==============================
-# SAVE TRAINING RESULTS (Metrics + Plots) INTO A TIMESTAMPED FOLDER
+# SAVE TRAINING RESULTS (Metrics + Plots) INTO TIMESTAMPED FOLDER
 # ==============================
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-results_dir = f"results_{timestamp}"
+results_dir = f"classification_results_{timestamp}"
 os.makedirs(results_dir, exist_ok=True)
 
-# 1) Save the overall CV summary table
+# 1) Save CV summary
 cv_summary_path = os.path.join(results_dir, "cv_summary.csv")
 res_df.to_csv(cv_summary_path, index=True)
-print(f"Saved CV summary to {cv_summary_path}")
+print(f"Saved CV summary -> {cv_summary_path}")
 
-# 2) Save all per-fold raw scores
+# 2) Save raw fold metrics
 folds_df = pd.DataFrame(folds_raw)
 folds_csv_path = os.path.join(results_dir, "fold_scores_raw.csv")
 folds_df.to_csv(folds_csv_path, index=False)
-print(f"Saved per-fold raw metrics to {folds_csv_path}")
+print(f"Saved per-fold raw metrics -> {folds_csv_path}")
 
-# 3) Copy plots into results_dir and record them in a CSV
+# 3) Save per-class SHAP table
+per_class_csv_path = os.path.join(results_dir, "per_class_top10_shap.csv")
+shutil.copy2(per_class_csv_temp, per_class_csv_path)
+print(f"Saved per-class Top-10 SHAP -> {per_class_csv_path}")
+
+# 4) Copy plots
 plot_paths = []
 for plot_file in os.listdir("plots"):
     src_path = os.path.join("plots", plot_file)
@@ -374,9 +387,9 @@ for plot_file in os.listdir("plots"):
 
 plots_csv_path = os.path.join(results_dir, "generated_plots.csv")
 pd.DataFrame(plot_paths).to_csv(plots_csv_path, index=False)
-print(f"Saved plot file registry to {plots_csv_path}")
+print(f"Saved plot file registry -> {plots_csv_path}")
 
-# 4) Save a run configuration snapshot
+# 5) Save run configuration snapshot
 config_snapshot = {
     "timestamp": timestamp,
     "use_gpu": USE_GPU,
@@ -389,6 +402,6 @@ config_snapshot = {
 }
 with open(os.path.join(results_dir, "run_config.json"), "w") as f:
     json.dump(config_snapshot, f, indent=4)
-print(f"Saved run configuration snapshot to {os.path.join(results_dir, 'run_config.json')}")
 
-print(f"\nAll results and plots saved in: {os.path.abspath(results_dir)}")
+print(f"\n📁 All results and plots saved in: {os.path.abspath(results_dir)}")
+
