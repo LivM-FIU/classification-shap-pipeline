@@ -1,5 +1,6 @@
+#!/usr/bin/env python3
 # ==============================
-# CLASSIFICATION PIPELINE (All Models Use SHAP TreeExplainer)
+# CLASSIFICATION PIPELINE (All Models + SHAP Plots)
 # ==============================
 import os
 import time
@@ -12,25 +13,28 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import shap
 
-# Optional: quiet xgboost user warnings about device/predict path, etc.
+# Quiet some noisy libs
 warnings.filterwarnings("ignore", category=UserWarning, module="xgboost")
-
-# If you keep CuPy for GPU-side XGBoost prediction (optional)
-import cupy as cp
 
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import (
-    accuracy_score, f1_score, precision_score, recall_score
-)
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from sklearn.base import clone
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.base import clone
+from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
+from catboost import CatBoostClassifier
 
 # -------- CONFIG --------
-USE_GPU = True          # GPU acceleration for training (XGB/LGBM/CatBoost)
-GPU_ID = 0
-TARGET_ID = "TCGA-39-5011-01A"  # Patient ID for SHAP visualization
+USE_GPU = True          # GPU for LightGBM if available
+GPU_ID  = 0
+TARGET_ID = "TCGA-39-5011-01A"  # Patient ID for force plots
+N_FOLDS = 5
+RANDOM_STATE = 42
+TOPK = 10               # top features to show in bars
+SHAP_SUBSAMPLE = 8000   # samples to compute SHAP on
+SHAP_BACKGROUND = 800   # background size for interventional explainer
 
 def minutes(sec):
     return sec / 60.0
@@ -44,6 +48,7 @@ sample_ids = df[id_col].astype(str).values
 y = df[class_col].astype(str).values
 X = df.iloc[:, 1:-1].copy().apply(pd.to_numeric, errors="coerce").astype(np.float32)
 X = X.fillna(X.median(numeric_only=True))
+feature_names = X.columns.tolist()
 
 # Encode labels
 le = LabelEncoder()
@@ -51,7 +56,6 @@ y_enc = le.fit_transform(y)
 classes = le.classes_.tolist()
 print(f"Classes: {classes}")
 print(f"Data: {X.shape[0]} samples × {X.shape[1]} features\n")
-
 
 # -------- RESULTS DIRECTORY --------
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -61,45 +65,75 @@ print(f"Results directory: {os.path.abspath(results_dir)}\n")
 
 # -------- BUILD MODELS --------
 def build_models(use_gpu=True, gpu_id=0):
-    from xgboost import XGBClassifier
-    from lightgbm import LGBMClassifier
-    from catboost import CatBoostClassifier
-
     models = {
-        # "DecisionTree": DecisionTreeClassifier(random_state=42),
-        # "RandomForest": RandomForestClassifier(
-        #     n_estimators=300, random_state=42, n_jobs=-1
-        # ),
-        # "XGBoost": XGBClassifier(
-        #     n_estimators=200,
-        #     learning_rate=0.05,
-        #     max_depth=6,
-        #     subsample=0.9,
-        #     colsample_bytree=0.9,
-        #     random_state=42,
-        #     n_jobs=-1,
-        #     eval_metric="mlogloss",
-        #     tree_method="hist",                # use 'hist'; GPU enabled via device
-        #     device="cuda" if use_gpu else "cpu"
-        # ),
+        # --- 1. Decision Tree ---
+        "DecisionTree": DecisionTreeClassifier(
+            criterion="gini",
+            max_depth=None,
+            random_state=RANDOM_STATE
+        ),
+
+        # --- 2. Random Forest ---
+        "RandomForest": RandomForestClassifier(
+            n_estimators=100,
+            max_depth=None,
+            min_samples_split=2,
+            min_samples_leaf=1,
+            max_features="sqrt",
+            n_jobs=-1,
+            random_state=RANDOM_STATE
+        ),
+
+        # --- 3. Gradient Boosting Machine (GBM) ---
+        "GradientBoosting": GradientBoostingClassifier(
+            n_estimators=100,
+            learning_rate=0.05,
+            max_depth=3,
+            subsample=0.9,
+            max_features=0.8,
+            random_state=RANDOM_STATE
+        ),
+
+        # --- 4. XGBoost ---
+        "XGBoost": XGBClassifier(
+            n_estimators=100,
+            learning_rate=0.05,
+            max_depth=6,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            objective="multi:softprob",
+            eval_metric="mlogloss",
+            tree_method="hist" if not use_gpu else "gpu_hist",
+            predictor="gpu_predictor" if use_gpu else "auto",
+            n_jobs=-1,
+            random_state=RANDOM_STATE
+        ),
+
+        # --- 5. LightGBM ---
         "LightGBM": LGBMClassifier(
-            n_estimators=100, learning_rate=0.05, num_leaves=64,
-            subsample=0.9, colsample_bytree=0.9, random_state=42,
-            device_type="gpu" if use_gpu else "cpu", verbosity=-1
-        )
-        # ,
-        # "CatBoost": CatBoostClassifier(
-        #     iterations=100, learning_rate=0.05, depth=6,
-        #     random_seed=42, verbose=False, loss_function="MultiClass",
-        #     task_type="GPU" if use_gpu else "CPU", devices=str(gpu_id)
-        # ),
-        # "GBM": GradientBoostingClassifier(
-        #     n_estimators=200, learning_rate=0.05,
-        #     max_depth=6, subsample=0.9, max_features=0.2,
-        #     validation_fraction=0.1, n_iter_no_change=10,
-        #     random_state=42
-        # )
+            n_estimators=100,
+            learning_rate=0.05,
+            num_leaves=64,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            random_state=RANDOM_STATE,
+            device_type="gpu" if use_gpu else "cpu",
+            verbosity=-1
+        ),
+
+        # --- 6. CatBoost ---
+        "CatBoost": CatBoostClassifier(
+            iterations=100,
+            learning_rate=0.05,
+            depth=6,
+            random_seed=RANDOM_STATE,
+            verbose=False,
+            loss_function="MultiClass",
+            task_type="GPU" if use_gpu else "CPU",
+            devices=str(gpu_id) if use_gpu else None
+        ),
     }
+
     return models
 
 try:
@@ -108,37 +142,21 @@ except Exception as e:
     print(f"[GPU init warning] Fallback to CPU: {e}")
     models = build_models(False, GPU_ID)
 
-
-def xgb_predict_labels(model, X_te, n_classes):
-    """Keep XGBoost prediction on GPU; fallback to CPU if needed."""
-    try:
-        booster = model.get_booster()
-        cp_X = cp.asarray(X_te.values if hasattr(X_te, "values") else np.asarray(X_te))
-        proba = booster.inplace_predict(cp_X)  # on-GPU, returns probabilities for multi
-        proba = cp.asnumpy(proba)
-        if n_classes > 2:
-            return np.argmax(proba, axis=1)
-        else:
-            return (proba > 0.5).astype(int)
-    except Exception:
-        # Fallback to standard CPU predict if anything goes wrong
-        return model.predict(X_te)
-
 # -------- 5-FOLD CROSS-VALIDATION --------
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-results = {}  # per-model aggregates
-folds_raw = []  # raw per-fold records across all models
+from sklearn.model_selection import StratifiedKFold
+cv = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+results = {}
 overall_start = time.perf_counter()
 
 for name, base_model in models.items():
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 90)
     print(f"Training model: {name}")
     model_start = time.perf_counter()
 
-    fold_accs, fold_f1s, fold_precisions, fold_recalls, fold_times = [], [], [], [], []
+    fold_accs, fold_f1s, fold_precisions, fold_recalls = [], [], [], []
 
     for fold_idx, (tr_idx, te_idx) in enumerate(cv.split(X, y_enc), start=1):
-        print(f"  [{name}] Fold {fold_idx}/5 ...", flush=True)
+        print(f"  [{name}] Fold {fold_idx}/{N_FOLDS} ...")
         fold_start = time.perf_counter()
 
         X_tr, X_te = X.iloc[tr_idx], X.iloc[te_idx]
@@ -146,14 +164,8 @@ for name, base_model in models.items():
 
         model = clone(base_model)
         model.fit(X_tr, y_tr)
+        y_pred = model.predict(X_te)
 
-        # --- GPU-safe prediction for XGBoost ---
-        if name == "XGBoost" and model.get_params().get("device") == "cuda":
-            y_pred = xgb_predict_labels(model, X_te, n_classes=len(classes))
-        else:
-            y_pred = model.predict(X_te)
-
-        # Metrics
         acc  = accuracy_score(y_te, y_pred)
         f1m  = f1_score(y_te, y_pred, average="macro")
         prec = precision_score(y_te, y_pred, average="macro", zero_division=0)
@@ -165,24 +177,7 @@ for name, base_model in models.items():
         fold_recalls.append(rec)
 
         fold_time = time.perf_counter() - fold_start
-        fold_times.append(fold_time)
-
-        # store raw record for this fold
-        folds_raw.append({
-            "model": name,
-            "fold": fold_idx,
-            "accuracy": acc,
-            "f1_macro": f1m,
-            "precision_macro": prec,
-            "recall_macro": rec,
-            "fold_minutes": minutes(fold_time),
-            "n_train": len(tr_idx),
-            "n_test": len(te_idx),
-        })
-
-        print(f"     Accuracy={acc:.4f}, F1-macro={f1m:.4f}, "
-              f"Precision={prec:.4f}, Recall={rec:.4f}, "
-              f"Time={minutes(fold_time):.2f} min")
+        print(f"     Acc={acc:.4f}, F1={f1m:.4f}, Prec={prec:.4f}, Rec={rec:.4f}, Time={minutes(fold_time):.2f}m")
 
     model_time = time.perf_counter() - model_start
     results[name] = {
@@ -193,287 +188,250 @@ for name, base_model in models.items():
         "train_minutes": minutes(model_time)
     }
 
-    print(f"{name}: Acc={results[name]['accuracy_mean']:.4f}, "
-          f"F1={results[name]['f1_macro_mean']:.4f}, "
-          f"Prec={results[name]['precision_macro_mean']:.4f}, "
-          f"Rec={results[name]['recall_macro_mean']:.4f}, "
-          f"Time={results[name]['train_minutes']:.2f} min")
-
 overall_time = time.perf_counter() - overall_start
 res_df = pd.DataFrame(results).T.sort_values(by="f1_macro_mean", ascending=False)
-print("\n=== CV Results (mean metrics & timing) ===")
+print("\n=== CV Results ===")
 print(res_df)
-print(f"\nTotal training time (all models): {minutes(overall_time):.2f} min")
-
-# Persist CV summary
-print("[Info] Skipping CSV export of CV summary (plots only requested).")
+print(f"\nTotal training time: {minutes(overall_time):.2f} min")
 
 # -------- METRICS BAR CHART --------
-plot_df = res_df[["accuracy_mean", "f1_macro_mean", "precision_macro_mean", "recall_macro_mean"]]
-
 plt.figure(figsize=(10, 6))
-x = np.arange(len(plot_df))  # models
+x = np.arange(len(res_df))
 w = 0.2
-
-plt.bar(x - 1.5*w, plot_df["accuracy_mean"].values,           width=w, label="Accuracy")
-plt.bar(x - 0.5*w, plot_df["f1_macro_mean"].values,           width=w, label="F1 (macro)")
-plt.bar(x + 0.5*w, plot_df["precision_macro_mean"].values,    width=w, label="Precision (macro)")
-plt.bar(x + 1.5*w, plot_df["recall_macro_mean"].values,       width=w, label="Recall (macro)")
-
-plt.xticks(x, plot_df.index, rotation=15, ha="right")
+plt.bar(x - 1.5*w, res_df["accuracy_mean"], width=w, label="Accuracy")
+plt.bar(x - 0.5*w, res_df["f1_macro_mean"], width=w, label="F1")
+plt.bar(x + 0.5*w, res_df["precision_macro_mean"], width=w, label="Precision")
+plt.bar(x + 1.5*w, res_df["recall_macro_mean"], width=w, label="Recall")
+plt.xticks(x, res_df.index, rotation=15, ha="right")
 plt.ylabel("Score")
-plt.ylim(0, 1.0)
-plt.title("Cross-validated Mean Metrics by Model")
+plt.title("Cross-Validated Mean Metrics")
 plt.legend()
 plt.tight_layout()
-metrics_bar_path = os.path.join(results_dir, "metrics_bar.png")
-plt.savefig(metrics_bar_path, dpi=150)
+plt.savefig(os.path.join(results_dir, "metrics_bar.png"), dpi=150)
 plt.close()
-print(f"Saved metrics bar chart -> {metrics_bar_path}")
 
-# -------- PICK BEST MODEL --------
+# -------- TRAIN BEST MODEL --------
 best_name = res_df.index[0]
 best_clf = models[best_name]
 print(f"\nBest model: {best_name}")
-
-# -------- FINAL TRAIN (100% DATA) --------
-print(f"\nFitting {best_name} on full dataset...")
 t0 = time.perf_counter()
 best_clf.fit(X, y_enc)
-print(f"Final training took {minutes(time.perf_counter()-t0):.2f} min")
+print(f"Training took {minutes(time.perf_counter()-t0):.2f} min")
 
-# -------- SHAP FOR BEST MODEL --------
-print("\nComputing SHAP values with TreeExplainer (probability, interventional)...")
+# ========== SHAP HELPERS ==========
+def normalize_shap_outputs(shap_values, n_classes):
+    """
+    Return sv_by_class with shape [C, N, F] regardless of SHAP return format.
+    Acceptable inputs:
+      - list of length C, each [N, F]
+      - ndarray [N, F, C]
+      - ndarray [C, N, F]
+      - ndarray [N, F] (binary-like -> single class)
+    """
+    if isinstance(shap_values, list):
+        arrs = [np.asarray(a) for a in shap_values]  # each [N,F]
+        # sanity: all same shape
+        N, F = arrs[0].shape
+        sv_by_class = np.stack(arrs, axis=0)  # [C,N,F]
+        return sv_by_class
+
+    arr = np.asarray(shap_values)
+    if arr.ndim == 3:
+        # Could be [N,F,C] or [C,N,F]
+        if arr.shape[-1] == n_classes:     # [N,F,C] -> [C,N,F]
+            return np.moveaxis(arr, -1, 0)
+        elif arr.shape[0] == n_classes:    # already [C,N,F]
+            return arr
+        else:
+            raise ValueError(f"Unexpected 3D SHAP shape {arr.shape} for {n_classes} classes")
+    elif arr.ndim == 2:
+        # [N,F] -> single class
+        return arr[None, ...]              # [1,N,F]
+    else:
+        raise ValueError(f"Unsupported SHAP shape: {arr.shape}")
+
+def get_base_values(expected_value, n_classes):
+    """Return base_values as shape [C]."""
+    bv = np.asarray(expected_value)
+    if bv.ndim == 0:
+        return np.repeat(float(bv), n_classes) if n_classes > 1 else np.array([float(bv)])
+    if bv.ndim == 1:
+        if len(bv) == 1 and n_classes > 1:
+            return np.repeat(float(bv[0]), n_classes)
+        if len(bv) == n_classes:
+            return bv.astype(float)
+    raise ValueError(f"Unexpected expected_value shape: {bv.shape}")
+
+# -------- SHAP COMPUTATION (Full Dataset) --------
+print("\nComputing SHAP values using the entire dataset ...")
 shap_start = time.perf_counter()
 
-# Provide background dataset for interventional mode (cap to dataset size)
-bg_size = min(len(X), 200)
-background = shap.utils.sample(X, bg_size, random_state=42)
+# Use the entire dataset for SHAP
+shap_X = X.copy()
+shap_y = y_enc.copy()
+
+# Use a moderate background (too large will slow down computation)
+bg_n = min(1000, len(shap_X))  # cap at 1000 for performance
+background = shap.utils.sample(shap_X, bg_n, random_state=RANDOM_STATE)
 
 explainer = shap.TreeExplainer(
-    model=best_clf,
+    best_clf,
     data=background,
-    model_output="probability",
-    feature_perturbation="interventional"
+    feature_perturbation="interventional",
+    model_output="probability"
 )
+raw_shap = explainer.shap_values(shap_X)
+sv_by_class = normalize_shap_outputs(raw_shap, n_classes=len(classes))  # [C, N, F]
+base_values = get_base_values(explainer.expected_value, n_classes=len(classes))
 
-# Compute SHAP values for the full dataset
-shap_values = explainer.shap_values(X)
-base_values = explainer.expected_value
+print(f"SHAP computation took {minutes(time.perf_counter() - shap_start):.2f} min")
 
-print(f"SHAP computation took {minutes(time.perf_counter()-shap_start):.2f} min")
+# Align feature names
+F_out = sv_by_class.shape[-1]
+if len(feature_names) != F_out:
+    feature_names = feature_names[:F_out] + [f"shap_feature_{i}" for i in range(len(feature_names), F_out)]
 
-# ---------- Normalize SHAP outputs ----------
-feature_names = X.columns.to_list()
-
-# sv_by_class -> [C, N, F]
-if isinstance(shap_values, list):
-    sv_by_class = np.stack([np.asarray(s) for s in shap_values], axis=0)
-else:
-    sv = np.asarray(shap_values)
-    if sv.ndim == 3:
-        sv_by_class = sv
-    elif sv.ndim == 2:
-        sv_by_class = sv[None, ...]
-    else:
-        raise ValueError(f"Unexpected shap_values shape: {sv.shape}")
-
-# base_per_class -> shape [C]
-if isinstance(base_values, (list, tuple, np.ndarray)):
-    base_per_class = np.array(base_values).reshape(-1)
-else:
-    base_per_class = np.array([float(base_values)])
-
-n_classes_out = sv_by_class.shape[0]
-if base_per_class.size == 1 and n_classes_out > 1:
-    base_per_class = np.repeat(base_per_class[0], n_classes_out)
-
-# Align feature names with SHAP output dimensionality
-n_shap_features = sv_by_class.shape[-1]
-explainer_feature_names = getattr(explainer, "feature_names", None)
-
-if explainer_feature_names is not None and len(explainer_feature_names) == n_shap_features:
-    feature_names = list(explainer_feature_names)
-elif len(feature_names) != n_shap_features:
-    print(
-        f"[Warning] Adjusting feature name list length ({len(feature_names)}) to match "
-        f"SHAP outputs ({n_shap_features})."
-    )
-    feature_names = feature_names[:n_shap_features]
-    if len(feature_names) < n_shap_features:
-        feature_names.extend([
-            f"shap_feature_{idx}" for idx in range(len(feature_names), n_shap_features)
-        ])
-
-# -------- TOP 10 FEATURES PER CLASS --------
-print("\n=== Per-Class Top 10 Features by mean |SHAP| ===")
-
-# Ensure consistent shapes (N must match)
-N = sv_by_class.shape[1]
-if len(y_enc) != N:
-    print(f"[Warning] Adjusting y_enc size ({len(y_enc)}) -> ({N}) to match SHAP output")
-    y_enc = np.array(y_enc[:N])
-
+# -------- CLASS-WISE |SHAP| --------
 class_feature_means = {}
-class_sample_counts = {}
+class_counts = {}
+
 for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
-    class_mask = (y_enc == cidx)
-    shap_matrix = sv_by_class[cidx]
+    mask = (shap_y == cidx)
+    n_samples_class = int(mask.sum())
+    class_counts[cname] = n_samples_class
+    print(f"  → {cname}: {n_samples_class} samples used for SHAP summary")
 
-    # Align shapes defensively if SHAP truncated/expanded samples
-    max_len = min(len(class_mask), shap_matrix.shape[0])
-    class_mask = class_mask[:max_len]
-    shap_matrix = shap_matrix[:max_len]
-
-    if not np.any(class_mask):
-        print(f"\n{cname}: [no samples in this class subset]")
+    if n_samples_class == 0:
         continue
 
-    class_sample_counts[cname] = int(class_mask.sum())
-    class_shap = shap_matrix[class_mask]
-    mean_abs = np.abs(class_shap).mean(axis=0)
-    class_feature_means[cname] = pd.Series(mean_abs[:len(feature_names)], index=feature_names)
+    mean_abs = np.abs(sv_by_class[cidx][mask, :]).mean(axis=0)
+    class_feature_means[cname] = pd.Series(mean_abs, index=feature_names)
 
-    top_idx = np.argsort(mean_abs)[::-1][:10]
-
-    print(f"\n{cname}:")
-    for rank, feature_index in enumerate(top_idx, start=1):
-        fname = str(feature_names[feature_index])
-        val = float(mean_abs[feature_index])
-        print(f"  #{rank:<2d} {fname:30s}  {val:.6f}")
-
-# -------- COHORT-WIDE FEATURE IMPORTANCE BARPLOT --------
-if class_feature_means:
+if not class_feature_means:
+    print("[Warning] No class SHAP summaries were computed.")
+else:
     class_order = [c for c in classes if c in class_feature_means]
-    class_mean_df = pd.DataFrame({cname: class_feature_means[cname] for cname in class_order})
-    class_mean_df.index.name = "feature"
+    class_df = pd.DataFrame({c: class_feature_means[c] for c in class_order})
+    class_df["cohort_mean_abs_shap"] = class_df.mean(axis=1)
 
-    # Cohort mean importance (mean across class-wise averages)
-    class_mean_df["cohort_mean_abs_shap"] = class_mean_df.mean(axis=1)
-    cohort_top_features = (
-        class_mean_df["cohort_mean_abs_shap"].sort_values(ascending=False).head(10).index
-    )
+    # --- Top Features ---
+    top_feats = class_df["cohort_mean_abs_shap"].nlargest(TOPK).index
+    top_df = class_df.loc[top_feats].sort_values("cohort_mean_abs_shap", ascending=True)
 
-    cohort_top_df = class_mean_df.loc[cohort_top_features]
-    cohort_top_df = cohort_top_df.sort_values("cohort_mean_abs_shap", ascending=True)
-
+    # --- Cohort-wide Bar Plot ---
     plt.figure(figsize=(12, 7))
-    y_pos = np.arange(len(cohort_top_df))
-    left = np.zeros(len(cohort_top_df))
-    color_map = plt.cm.get_cmap("tab10", len(class_order))
+    y_pos = np.arange(len(top_df))
+    left = np.zeros(len(top_df))
+    cmap = plt.cm.get_cmap("tab10", len(class_order))
 
-    for cidx, cname in enumerate(class_order):
-        contrib = cohort_top_df[cname].values
-        plt.barh(
-            y_pos,
-            contrib,
-            left=left,
-            color=color_map(cidx),
-            edgecolor="black",
-            label=f"{cname} (n={class_sample_counts.get(cname, 0)})"
-        )
+    for i, cname in enumerate(class_order):
+        contrib = top_df[cname].values
+        plt.barh(y_pos, contrib, left=left, color=cmap(i), edgecolor="black",
+                 label=f"{cname} (n={class_counts.get(cname, 0)})")
         left += contrib
 
-    plt.yticks(y_pos, cohort_top_df.index)
-    plt.xlabel("Mean |SHAP| attribution")
-    plt.title("Top 10 Features – Cohort-wide Class Contributions")
-    plt.legend(loc="lower right", frameon=True)
+    plt.yticks(y_pos, top_df.index)
+    plt.xlabel("Mean |SHAP|")
+    plt.title("Cohort-wise Feature Importance (stacked by class)")
+    plt.legend(loc="lower right")
     plt.tight_layout()
-    cohort_plot_path = os.path.join(results_dir, "cohort_feature_importance.png")
-    plt.savefig(cohort_plot_path, dpi=150)
+    plt.savefig(os.path.join(results_dir, "cohort_feature_importance.png"), dpi=150)
     plt.close()
-    print(f"Saved cohort feature importance bar plot -> {cohort_plot_path}")
 
-    # --- Per-class breakdown plots ---
-    per_class_plot_dir = os.path.join(results_dir, "per_class_feature_importance")
-    os.makedirs(per_class_plot_dir, exist_ok=True)
-
-    for cidx, cname in enumerate(class_order):
-        if cname not in class_feature_means:
-            continue
-
-        class_series = class_feature_means[cname].sort_values(ascending=False).head(10)
+    # --- Per-Class Bar Plots ---
+    for i, cname in enumerate(class_order):
+        series = class_feature_means[cname].nlargest(TOPK)
         plt.figure(figsize=(10, 6))
-        y_pos = np.arange(len(class_series))
-        plt.barh(
-            y_pos,
-            class_series.values,
-            color=color_map(cidx),
-            edgecolor="black",
-        )
-        plt.yticks(y_pos, class_series.index)
-        plt.xlabel("Mean |SHAP| attribution (class-specific)")
-        plt.title(
-            "Top 10 Features – "
-            f"{cname} (n={class_sample_counts.get(cname, 0)})"
-        )
+        pos = np.arange(len(series))
+        plt.barh(pos, series.values[::-1], color=cmap(i), edgecolor="black")
+        plt.yticks(pos, series.index[::-1])
+        plt.xlabel("Mean |SHAP|")
+        plt.title(f"Top {TOPK} Features — {cname} (n={class_counts[cname]})")
         plt.tight_layout()
-
-        class_plot_path = os.path.join(
-            per_class_plot_dir,
-            f"feature_importance_{cname.replace(' ', '_')}.png"
-        )
-        plt.savefig(class_plot_path, dpi=150)
+        plt.savefig(os.path.join(results_dir, f"feature_importance_{cname.replace(' ', '_')}.png"), dpi=150)
         plt.close()
-        print(f"Saved per-class feature importance plot -> {class_plot_path}")
-else:
-    print("[Warning] Could not compute cohort bar plot because no class SHAP summaries were available.")
 
-# -------- FORCE PLOTS --------
+
+    # per-class bars
+    for i, cname in enumerate(class_order):
+        series = class_feature_means[cname].nlargest(TOPK)
+        plt.figure(figsize=(10, 6))
+        pos = np.arange(len(series))
+        plt.barh(pos, series.values[::-1], color=cmap(i), edgecolor="black")
+        plt.yticks(pos, series.index[::-1])
+        plt.xlabel("Mean |SHAP|")
+        plt.title(f"Top {TOPK} Features — {cname} (n={class_counts[cname]})")
+        plt.tight_layout()
+        plt.savefig(os.path.join(results_dir, f"feature_importance_{cname.replace(' ', '_')}.png"), dpi=150)
+        plt.close()
+
+# -------- FORCE PLOTS (TARGET_ID) --------
+# We compute SHAP for the exact target row to avoid mismatch with shap_X
 if TARGET_ID in sample_ids:
     row_idx = np.where(sample_ids == TARGET_ID)[0][0]
 else:
     row_idx = 0
-    print(f"[Note] {TARGET_ID} not found; using row 0 instead.")
+    print(f"[Note] {TARGET_ID} not found; using first sample ({sample_ids[0]}).")
 
-print(f"\nGenerating force plots for {sample_ids[row_idx]} ...")
-sample_row = X.iloc[[row_idx]]
-sample_proba = best_clf.predict_proba(sample_row)[0]
+target_row = X.iloc[[row_idx]]
+# reuse the same explainer (interventional + probability)
+target_shap_raw = explainer.shap_values(target_row)   # list or array
+target_sv_by_class = normalize_shap_outputs(target_shap_raw, n_classes=len(classes))  # [C,1,F]
+target_sv_by_class = target_sv_by_class[:, 0, :]  # -> [C,F]
+try:
+    target_proba = best_clf.predict_proba(target_row)[0]
+except Exception:
+    target_proba = None
 
-for cidx, cname in enumerate(classes[:sv_by_class.shape[0]]):
-    base_val = float(base_per_class[cidx]) if base_per_class.ndim > 0 else float(base_per_class)
-    fx_val = float(sample_proba[cidx])
-    print(
-        f"  {cname}: base value (mean class probability) = {base_val:.6f}, "
-        f"f(x) = {fx_val:.6f}"
-    )
+for cidx, cname in enumerate(classes[:target_sv_by_class.shape[0]]):
+    base_val = float(base_values[cidx])
+    plt.figure(figsize=(12, 8))  # taller figure for better spacing
     shap.force_plot(
         base_val,
-        sv_by_class[cidx][row_idx, :],
-        X.iloc[row_idx, :],
+        target_sv_by_class[cidx, :],
         feature_names=feature_names,
         matplotlib=True,
         show=False
     )
-    plt.title(f"{sample_ids[row_idx]} — {cname}\nBase={base_val:.4f}, f(x)={fx_val:.4f}")
-    plt.tight_layout()
+
+    # Clean unwanted text overlays ("f(x)", "base value")
+    ax = plt.gca()
+    fig = ax.figure
+    for txt in list(ax.texts):
+        t = txt.get_text().strip().lower()
+        if "f(x)" in t or "base value" in t:
+            txt.set_visible(False)
+
+    # Adjust layout for more headroom
+    fig.subplots_adjust(top=0.80)
+
+    # Title placed completely OUTSIDE the plot (top-left of figure)
+    title_str = f"{sample_ids[row_idx]} — {cname}"
+    fig.text(
+        0.02, 0.98,                  # coordinates: left/top margin (0–1)
+        title_str,
+        ha="left",
+        va="top",
+        fontsize=11,
+        fontweight="bold",
+        color="#222222",
+    )
+
+    # Save and close properly
     out_path = os.path.join(results_dir, f"force_{sample_ids[row_idx]}_{cname}.png")
-    plt.savefig(out_path, dpi=150)
-    plt.close()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight", pad_inches=0.4)
+    plt.close(fig)
+    print(f"Saved force plot → {out_path}")
 
-print(f"\nSaved SHAP force plots for all classes to {results_dir}")
-
-# ==============================
-# SAVE TRAINING RESULTS (Metrics + Plots) INTO TIMESTAMPED FOLDER
-# ==============================
-
-# Raw fold metrics
-if folds_raw:
-    print("[Info] Per-fold metrics captured in memory; CSV export skipped (plots only requested).")
-
-# 5) Save run configuration snapshot
-config_snapshot = {
+# -------- SAVE CONFIG --------
+cfg = {
     "timestamp": timestamp,
     "use_gpu": USE_GPU,
-    "gpu_id": GPU_ID,
     "best_model": best_name,
     "n_samples": int(X.shape[0]),
     "n_features": int(X.shape[1]),
-    "classes": list(classes),
-    "target_id": TARGET_ID,
+    "classes": classes,
+    "target_id": TARGET_ID
 }
-with open(os.path.join(results_dir, "run_config.json"), "w") as f:
-    json.dump(config_snapshot, f, indent=4)
 
-print(f"\n All results and plots saved in: {os.path.abspath(results_dir)}")
-
+print(f"\nAll results and plots saved")
